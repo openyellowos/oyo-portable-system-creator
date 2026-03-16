@@ -215,9 +215,15 @@ USB一覧
 
 # 3. Pythonディレクトリ構成
 
-    oyo-portable-usb-creator/
+v1 正本は `structure_spec` と同一の次構成を採用する。
+
+    oyo-portable-system-creator/
 
     src/
+
+     bin/
+       oyo-portable-system-creator
+       oyo-portable-system-cli
 
      gui/
        main_window.py
@@ -226,20 +232,26 @@ USB一覧
      core/
        controller.py
        workflow.py
+       state.py
 
-     system/
-       device_manager.py
-       partition_manager.py
-       copy_manager.py
-       grub_manager.py
+     services/
+       device_service.py
+       partition_service.py
+       copy_service.py
+       boot_service.py
+       optimize_service.py
+       firstboot_service.py
 
-     utils/
+     infra/
        logger.py
-       validator.py
-       shell.py
+       command_runner.py
+       chroot.py
 
-     config/
-       defaults.py
+     templates/
+       firstboot.service
+       fstab.portable
+       tmpfs.conf
+       grub-portable.cfg
 
      main.py
 
@@ -392,6 +404,12 @@ rsyncコピー時は以下を除外する。
   rsync失敗     停止
   grub失敗      警告
   mount失敗     停止
+
+補足（v1）:
+
+- root 構成が LVM / mdraid / dm-crypt の場合は事前検証で停止（非対応）
+- 失敗時は `sync` 後に mount/chroot を必ず解除する
+- 中断後の再開実行は行わず、再実行は最初から行う
 
 ------------------------------------------------------------------------
 

@@ -265,19 +265,40 @@ GUI では以下を提供する。
 ```
 oyo-portable-system-creator
 ├── src
-│   ├── cli
+│   ├── bin
+│   │   ├── oyo-portable-system-creator
+│   │   └── oyo-portable-system-cli
 │   ├── gui
-│   ├── lib
-│   │    ├── disk.py
-│   │    ├── rsync_copy.py
-│   │    ├── grub_setup.py
-│   │    └── fstab_update.py
+│   │   ├── main_window.py
+│   │   └── wizard_pages.py
+│   ├── core
+│   │   ├── controller.py
+│   │   ├── workflow.py
+│   │   └── state.py
+│   ├── services
+│   │   ├── device_service.py
+│   │   ├── partition_service.py
+│   │   ├── copy_service.py
+│   │   ├── boot_service.py
+│   │   ├── optimize_service.py
+│   │   └── firstboot_service.py
+│   ├── infra
+│   │   ├── command_runner.py
+│   │   ├── logger.py
+│   │   └── chroot.py
+│   └── templates
+│       ├── firstboot.service
+│       ├── fstab.portable
+│       ├── tmpfs.conf
+│       └── grub-portable.cfg
 │   └── main.py
 │
 ├── debian
 │
 └── README.md
 ```
+
+v1 の正本構成は上記とし、`src/lib` / `src/system` / `src/utils` などの旧記述は参照しない。
 
 ---
 
@@ -291,6 +312,12 @@ oyo-portable-system-creator
 | BIOS起動 | 起動確認 |
 | UEFI起動 | 起動確認 |
 | Secure Boot(任意) | 対応環境での起動確認 |
+
+受け入れ基準（v1）:
+
+- 20GB の実データを 32GB USB(USB3.0 相当)へコピーした場合、完了目安は 120 分以内
+- 実行中のアプリ追加メモリ使用量（常時）は 512MB 以下
+- 詳細ログは 1 実行あたり 50MB 以下を目安とし、超過時はローテートする
 
 ## 障害テスト
 
@@ -338,6 +365,74 @@ oyo-portable-system-creator.deb
 - snapshot rollback
 - encrypted USB
 - persistence option
+
+---
+
+# 19. サポートマトリクス（v1）
+
+| 項目 | v1 方針 |
+|---|---|
+| root on ext4 (単一パーティション) | 対応 |
+| root on LVM | 非対応（検出したら実行拒否） |
+| root on mdraid | 非対応（検出したら実行拒否） |
+| root on dm-crypt/LUKS | 非対応（検出したら実行拒否） |
+| BIOS 起動 | 対応 |
+| UEFI 起動 | 対応 |
+| Secure Boot | 必須外（v1.1 以降） |
+
+非対応構成を検出した場合は、GUI/CLI ともに理由付きで停止し、破壊的処理へ進まない。
+
+---
+
+# 20. 失敗時ポリシー（ロールバック/クリーンアップ）
+
+| ステップ | 失敗時動作 | クリーンアップ | 再実行 |
+|---|---|---|---|
+| デバイス検証 | 即停止 | なし | 条件修正後に可 |
+| パーティション作成 | 即停止 | mount があれば解除 | 可（再初期化前提） |
+| フォーマット | 即停止 | mount があれば解除 | 可 |
+| rsync | 即停止 | `/mnt/usb` を安全に umount | 可（先頭から再実行） |
+| grub-install/update-grub | 即停止 | chroot/mount を解除 | 可 |
+| 最適化適用 | 警告または停止（設定次第） | 可能な範囲で差分戻し | 可 |
+
+共通ルール:
+
+- 失敗時は必ず `sync` 実行後に umount を試行する
+- 「未完成USB」であることをログと完了画面（失敗画面）に明示する
+- `--force-resume` は v1 では提供せず、再実行はフル再実行のみ
+
+---
+
+# 21. firstboot責務分離（build時との境界）
+
+build時に実施:
+
+- rootfs コピー
+- fstab 生成
+- firstboot service/script 配置
+- journald/tmpfs など静的設定ファイル配置
+
+firstbootで実施:
+
+- `/etc/machine-id` 再生成
+- SSH host key 再生成
+- ユーザーキャッシュのRAM化（必要時）
+- 完了マーカー作成（例: `/var/lib/oyo-portable/firstboot.done`）
+
+---
+
+# 22. 機密データコピー仕様（v1）
+
+オプション別コピー対象（例）:
+
+- Wi-Fi設定を含める: `/etc/NetworkManager/system-connections/*`
+- SSH鍵を含める（既定OFF）: `~/.ssh/*`
+
+安全要件:
+
+- GUI は「機密情報を含む可能性」を明示し、既定値は安全側（SSH鍵 OFF）
+- ログには秘密情報そのものを出力しない（ファイル内容のダンプ禁止）
+- 実行記録には「どの機密オプションが ON だったか」だけを残す
 
 ---
 
