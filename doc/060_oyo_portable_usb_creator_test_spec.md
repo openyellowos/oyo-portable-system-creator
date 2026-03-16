@@ -31,7 +31,7 @@
 
   項目     内容
   -------- ----------------
-  OS       Debian 12 / 13
+  OS       open.Yellow.os（v1サポート対象）
   Python   3.10以上
   GUI      PyQt6
 
@@ -84,6 +84,23 @@
 注記:
 - Secure Boot は v1 の必須合格条件に含めない。
 - v1.1 以降の限定対応として、対応環境でのみ別途検証する。
+- v1 の対象OSは open.Yellow.os のみ。Debian/Ubuntu 一般対応テストは実施対象外。
+
+------------------------------------------------------------------------
+
+# 3.1 自動テスト実行要件（v1）
+
+最低限、以下を CI または開発環境で実行する。
+
+    python -m pytest tests/unit -q
+    python -m pytest tests/integration -q
+    python -m pytest tests/contract -q
+
+合否条件:
+
+- unit/integration/contract の全テスト成功
+- 失敗時に `E***` エラーコードをログへ出力できる
+- `--dry-run` 実行では破壊的処理（partition/format）が呼ばれない
 
 
 # 4. 詳細テストケース
