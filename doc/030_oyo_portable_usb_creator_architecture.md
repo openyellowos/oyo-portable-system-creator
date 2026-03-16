@@ -1,8 +1,8 @@
-# oYo Portable USB Creator
+# oyo-portable-system-creator
 
 ## 開発アーキテクチャ設計書 v1
 
-本書は **oYo Portable USB Creator**
+本書は **oyo-portable-system-creator**
 の実装を行う開発者向けの設計書である。\
 詳細機能仕様書 v1 を前提に、以下を定義する。
 
@@ -12,6 +12,10 @@
 -   クラス設計
 -   処理フローチャート
 -   rsync除外リスト
+
+本書では v1 の正本として、**GUI も実行ロジックも Python 実装**を採用する。
+外部コマンド（`rsync`, `parted`, `grub-install` など）は Python から `subprocess` で呼び出し、
+ログ・例外処理・リトライ方針を共通化する。
 
 ------------------------------------------------------------------------
 

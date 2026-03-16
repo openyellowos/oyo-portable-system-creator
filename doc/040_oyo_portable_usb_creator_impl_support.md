@@ -1,4 +1,4 @@
-# oYo Portable USB Creator
+# oyo-portable-system-creator
 ## 実装補助設計書 v1
 ### GUIワイヤーフレーム / 安全設計 / 実装サンプル / systemd設定
 
