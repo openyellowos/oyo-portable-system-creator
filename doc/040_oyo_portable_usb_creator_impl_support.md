@@ -801,7 +801,7 @@ v1 の開発は以下の順序を推奨する。
 
 以下を満たしたら v1 完了とみなす。
 
-- 現在起動中の Debian 系 Linux を USB に複製できる
+- 現在起動中の **open.Yellow.os** を USB に複製できる
 - 作成した USB が BIOS / UEFI の少なくとも基本構成で起動できる
 - root disk を誤って選べない
 - `/tmp` / `~/.cache` / journald の最適化が有効
@@ -820,3 +820,71 @@ v1 の開発は以下の順序を推奨する。
 3. **エラーコード一覧**
 4. **インストール後生成ファイル一覧**
 5. **Python雛形コード一式**
+
+---
+
+# 13. 実装前レビュー指摘の反映（不足項目）
+
+本節は、v1 実装開始前に指摘された「仕様にあるが実装条件として弱い点」を
+開発タスク化するためのチェックリストである。
+
+## 13.1 スコープ固定（v1）
+
+- 対応OSは **open.Yellow.os のみ** とする
+- コピー元OS判定は `E120` を返せること（`/etc/os-release` 判定）
+- GUI の説明文も「Debian系一般対応」のような曖昧表現を避ける
+
+## 13.2 事前検証で不足している実装項目
+
+### A. OS/環境チェック
+- `ID=openyellowos` または `NAME=open.Yellow.os` を満たさない場合は開始不可
+- root 権限必須チェック（不足時は `E121` 相当で停止）
+- 必須コマンド存在チェック（`rsync`, `parted`, `mkfs.*`, `grub-install`, `update-initramfs`）
+
+### B. コピー元構成チェック
+- root が `ext4` 以外の場合の挙動を明文化（v1 は非対応停止）
+- `LVM` / `mdraid` / `dm-crypt` 検出を実コードに落とす
+- `/boot`・`/boot/efi` の有無を前提分岐として保持
+
+### C. 容量見積りチェック
+- `required_bytes = used_bytes("/") * 1.15 + 4GiB` を実装する
+- 見積り根拠（使用量・安全率・固定バッファ）を GUI/CLI ログに出す
+
+## 13.3 実行処理で不足している実装項目
+
+### A. マウント/アンマウント安全化
+- 途中失敗時にも `sync` → `umount`（必要なら lazy umount）を必ず実行
+- chroot bind mount（`/dev`, `/proc`, `/sys`）の解除順序を固定
+
+### B. GRUB / initramfs
+- BIOS/UEFI 両方の install を対象環境に応じて実行
+- `update-grub` 失敗時は致命扱い（v1）
+- `update-initramfs -u` を finalization に必ず含める
+
+### C. firstboot 配置
+- `firstboot.service` 配置と `enable` の成否を検証する
+- `firstboot.done` の作成パスを仕様と一致させる（`/var/lib/oyo-portable/firstboot.done`）
+
+## 13.4 ログ・エラー仕様で不足している実装項目
+
+- エラーコードと CLI 終了コードの対応を共通関数化する
+- GUI は「ユーザー向け文言」、詳細ログは「原因コマンド + exit code」を残す
+- 機密オプション（Wi-Fi/SSH鍵）の ON/OFF は記録し、秘密値は記録しない
+
+## 13.5 テスト観点で不足している項目（最小）
+
+- open.Yellow.os 以外で `E120` になること
+- root disk が候補に出ないこと
+- 容量不足で `E202` になること
+- rsync 失敗で `E401` になること
+- grub 失敗で `E501` になること
+- firstboot 準備失敗で `E601` になること
+
+## 13.6 実装着手ゲート（DoR）
+
+以下を満たすまで、実装を「着手可」としない。
+
+1. v1 スコープが open.Yellow.os のみで文書間一致している
+2. エラーコードと停止条件が仕様書と一致している
+3. 安全停止（cleanup）手順が疑似コードレベルで定義済み
+4. テスト仕様（異常系含む）に最低ケースが記載済み

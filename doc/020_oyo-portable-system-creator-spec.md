@@ -530,6 +530,69 @@ firstboot 状態遷移（v1確定）:
 
 ---
 
+# 24. 実装不足チェックリスト（v1 / open.Yellow.os 専用）
+
+本チェックリストは、実装着手前レビューと実装完了判定の両方に使う。
+各項目は **「実装済み + テストで確認済み」** を完了条件とする。
+
+## 24.1 事前検証（Preflight）
+
+| ID | チェック項目 | 完了条件 | 失敗時 |
+|---|---|---|---|
+| P-01 | OS判定 | `/etc/os-release` で `NAME=open.Yellow.os` または `ID=openyellowos` を許可 | `E120` |
+| P-02 | 権限判定 | 実行ユーザーが root（`EUID=0`） | `E121` |
+| P-03 | 依存コマンド | `rsync`, `parted`, `mkfs.fat`, `mkfs.ext4`, `grub-install`, `update-grub`, `update-initramfs` が存在 | `E122` |
+| P-04 | 非対応root構成 | root が ext4 以外、または LVM/mdraid/dm-crypt を検出したら停止 | `E130` |
+| P-05 | 容量見積り | `required_bytes = used_bytes("/") * 1.15 + 4GiB` を満たす | `E202` |
+
+## 24.2 安全性（Device Safety）
+
+| ID | チェック項目 | 完了条件 | 失敗時 |
+|---|---|---|---|
+| S-01 | root disk 排除 | root/boot/boot-efi/home/swap の親ディスクが選択候補に出ない | `E201` |
+| S-02 | USB判定 | v1 は `TRAN=usb` を原則必須（`rm` は補助） | `E201` |
+| S-03 | 破壊的処理ガード | `--dry-run` で partition/format が呼ばれない | `0`（検証のみ） |
+| S-04 | 二重確認 | GUI最終確認チェック2つ未ONなら実行不可 | UIで停止 |
+
+## 24.3 実行フロー（Execution）
+
+| ID | チェック項目 | 完了条件 | 失敗時 |
+|---|---|---|---|
+| X-01 | パーティション | GPT + EFI 512MiB + root ext4 を作成 | `E301` |
+| X-02 | rsync | `-aHAXx --numeric-ids --delete` と除外ルールでコピー | `E401` |
+| X-03 | fstab更新 | target root の `UUID` を反映 | `E402` |
+| X-04 | GRUB | BIOS/UEFI 対応の `grub-install` + `update-grub` 成功 | `E501` |
+| X-05 | initramfs | `update-initramfs -u` 成功 | `E502` |
+| X-06 | firstboot準備 | service/script 配置と enable 成功 | `E601` |
+
+## 24.4 失敗時クリーンアップ（Cleanup）
+
+| ID | チェック項目 | 完了条件 | 失敗時の最低動作 |
+|---|---|---|---|
+| C-01 | `sync` 実行 | 失敗時に必ず `sync` を記録 | 続行 |
+| C-02 | umount順序 | chroot bind mount → target mount の順で解除 | 解除を再試行 |
+| C-03 | 失敗表示 | 「未完成USB」を GUI/CLI に明示 | 終了コード `5` |
+
+## 24.5 ログ/監査（Logging）
+
+| ID | チェック項目 | 完了条件 |
+|---|---|---|
+| L-01 | 実行コマンド | 主要コマンドと exit code を詳細ログへ記録 |
+| L-02 | エラー対応表 | `E***` と CLI終了コードのマップを1箇所に集約 |
+| L-03 | 機密保護 | Wi-Fi/SSH鍵は ON/OFF のみ記録、秘密値は出力しない |
+| L-04 | ローテート | 1実行50MB超過時にローテートされる |
+
+## 24.6 受け入れゲート（DoD）
+
+以下をすべて満たしたときに v1 実装完了と判定する。
+
+1. P/S/X/C/L の必須項目が全て「実装済み」。
+2. テスト仕様の最低ケース（T01〜T07, T10〜T14）が合格。
+3. open.Yellow.os 以外のOSでは必ず `E120` で停止。
+4. 失敗注入（rsync/grub）時に mount/chroot 残留がない。
+
+---
+
 # まとめ
 
 本ツールは
