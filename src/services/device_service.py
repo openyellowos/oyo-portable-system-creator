@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import re
 from pathlib import Path
 
 from src.core.errors import AppError
@@ -99,6 +100,15 @@ class DeviceService:
     def _root_disk_path(self) -> str:
         result = self.runner.run(["findmnt", "-n", "-o", "SOURCE", "/"], check=True)
         root_source = result.stdout.strip()
-        if root_source.startswith("/dev/") and root_source[-1].isdigit():
-            return root_source.rstrip("0123456789")
+        if root_source.startswith("/dev/"):
+            parent = self.runner.run(["lsblk", "-n", "-o", "PKNAME", root_source], check=False).stdout.strip()
+            if parent:
+                return f"/dev/{parent}"
+            # Fallback for environments where PKNAME is unavailable.
+            if re.match(r"^/dev/(nvme\dn\d+)p\d+$", root_source):
+                return re.sub(r"p\d+$", "", root_source)
+            if re.match(r"^/dev/(mmcblk\d+)p\d+$", root_source):
+                return re.sub(r"p\d+$", "", root_source)
+            if root_source[-1].isdigit():
+                return root_source.rstrip("0123456789")
         return root_source
