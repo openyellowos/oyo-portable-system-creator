@@ -1,0 +1,5 @@
+src/bin/oyo-portable-system-creator usr/bin/
+src/bin/oyo-portable-system-cli usr/bin/
+src usr/share/oyo-portable-system-creator/
+desktop/oyo-portable-system-creator.desktop usr/share/applications/
+packaging/oyo-portable-system-creator usr/lib/policykit-1/
