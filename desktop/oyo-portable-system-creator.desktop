@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=OYO Portable System Creator
+Exec=oyo-portable-system-creator
+Icon=oyo-portable-system-creator
+Categories=System;
+Terminal=false
