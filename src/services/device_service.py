@@ -46,19 +46,29 @@ class DeviceService:
             raise AppError("E122", f"必須コマンド不足: {', '.join(missing)}")
 
     def list_target_devices(self) -> list[dict]:
-        result = self.runner.run(["lsblk", "--json", "-o", "NAME,PATH,TYPE,SIZE,RM,TRAN"], check=True)
+        result = self.runner.run(["lsblk", "--json", "-b", "-o", "NAME,PATH,TYPE,SIZE,RM,TRAN"], check=True)
         data = json.loads(result.stdout)
         devices = []
+        root_disk = self._root_disk_path()
         for item in data.get("blockdevices", []):
             if item.get("type") != "disk":
                 continue
             path = item.get("path") or f"/dev/{item['name']}"
-            if path == self._root_disk_path():
+            if path == root_disk:
                 continue
             removable = bool(item.get("rm")) or item.get("tran") == "usb"
             if removable:
                 devices.append(item)
         return devices
+
+    def validate_target_device(self, target_device: str) -> None:
+        candidates = self.list_target_devices()
+        candidate_paths = {(d.get("path") or f"/dev/{d['name']}") for d in candidates}
+        root_disk = self._root_disk_path()
+        if target_device == root_disk:
+            raise AppError("E203", "システムディスクは指定できません")
+        if target_device not in candidate_paths:
+            raise AppError("E201", "コピー先デバイスが不正です（USB/リムーバブルのみ指定可）")
 
     def estimate_required_bytes(self, source_path: str = "/") -> int:
         st = os.statvfs(source_path)
@@ -66,6 +76,21 @@ class DeviceService:
         required = int(used * 1.15) + (4 * 1024**3)
         self.logger.info(f"容量見積: used={used} required={required}")
         return required
+
+    def check_capacity(self, target_device: str, required_bytes: int) -> None:
+        size = self.get_device_size_bytes(target_device)
+        self.logger.info(f"容量確認: target={target_device} size={size} required={required_bytes}")
+        if size < required_bytes:
+            raise AppError("E202", f"容量不足です: required={required_bytes}, device={size}")
+
+    def get_device_size_bytes(self, target_device: str) -> int:
+        result = self.runner.run(["lsblk", "--json", "-b", "-o", "PATH,SIZE"], check=True)
+        data = json.loads(result.stdout)
+        for item in data.get("blockdevices", []):
+            path = item.get("path")
+            if path == target_device:
+                return int(item.get("size") or 0)
+        raise AppError("E201", f"対象デバイスが見つかりません: {target_device}")
 
     def _root_disk_path(self) -> str:
         result = self.runner.run(["findmnt", "-n", "-o", "SOURCE", "/"], check=True)
