@@ -11,11 +11,15 @@ from src.infra.logger import AppLogger
 
 REQUIRED_COMMANDS = [
     "lsblk",
+    "findmnt",
+    "blkid",
     "parted",
+    "partprobe",
     "mkfs.vfat",
     "mkfs.ext4",
     "mount",
     "umount",
+    "chroot",
     "rsync",
     "grub-install",
     "update-grub",

@@ -50,12 +50,10 @@ class CopyService:
     def write_fstab(self, target_root: Path, root_uuid: str, efi_uuid: str) -> None:
         fstab = target_root / "etc/fstab"
         fstab.parent.mkdir(parents=True, exist_ok=True)
-        body = (
-            f"UUID={root_uuid} / ext4 noatime,errors=remount-ro 0 1\n"
-            f"UUID={efi_uuid} /boot/efi vfat umask=0077 0 1\n"
-            "tmpfs /tmp tmpfs defaults,noatime,mode=1777 0 0\n"
-        )
+        template = Path(__file__).resolve().parent.parent / "templates/fstab.portable"
         try:
+            body = template.read_text(encoding="utf-8")
+            body = body.replace("{{ROOT_UUID}}", root_uuid).replace("{{EFI_UUID}}", efi_uuid)
             fstab.write_text(body, encoding="utf-8")
         except OSError as exc:
             raise AppError("E402", f"fstab 生成失敗: {exc}") from exc
