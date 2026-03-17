@@ -25,8 +25,9 @@ class PartitionService:
         except Exception as exc:
             raise AppError("E301", f"パーティション作成失敗: {exc}") from exc
 
-        efi = f"{device}1"
-        root = f"{device}2"
+        suffix = "p" if device.startswith("/dev/nvme") or device.startswith("/dev/mmcblk") else ""
+        efi = f"{device}{suffix}1"
+        root = f"{device}{suffix}2"
         return efi, root
 
     def make_filesystems_and_mount(self, efi_part: str, root_part: str, workdir: Path) -> tuple[Path, Path]:

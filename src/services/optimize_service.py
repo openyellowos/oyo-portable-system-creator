@@ -18,10 +18,10 @@ class OptimizeService:
     def _setup_tmpfs(self, target_root: Path) -> None:
         tmpfiles_dir = target_root / "etc/tmpfiles.d"
         tmpfiles_dir.mkdir(parents=True, exist_ok=True)
+        template = Path(__file__).resolve().parent.parent / "templates/tmpfs.conf"
+        base = template.read_text(encoding="utf-8")
         (tmpfiles_dir / "oyo-portable.conf").write_text(
-            "d /tmp 1777 root root -\n"
-            "d /var/tmp 1777 root root -\n"
-            "d /var/cache/apt/archives 0755 root root -\n",
+            base + "d /var/cache/apt/archives 0755 root root -\n",
             encoding="utf-8",
         )
 

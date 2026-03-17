@@ -12,6 +12,7 @@ class FirstbootService:
         try:
             script = target_root / "usr/local/sbin/oyo-firstboot"
             unit = target_root / "etc/systemd/system/oyo-firstboot.service"
+            template = Path(__file__).resolve().parent.parent / "templates/firstboot.service"
             script.parent.mkdir(parents=True, exist_ok=True)
             unit.parent.mkdir(parents=True, exist_ok=True)
             script.write_text(
@@ -26,12 +27,7 @@ class FirstbootService:
                 encoding="utf-8",
             )
             script.chmod(0o755)
-            unit.write_text(
-                "[Unit]\nDescription=OYO Portable Firstboot\nAfter=network.target\n"
-                "[Service]\nType=oneshot\nExecStart=/usr/local/sbin/oyo-firstboot\n"
-                "[Install]\nWantedBy=multi-user.target\n",
-                encoding="utf-8",
-            )
+            unit.write_text(template.read_text(encoding="utf-8"), encoding="utf-8")
             wants = target_root / "etc/systemd/system/multi-user.target.wants"
             wants.mkdir(parents=True, exist_ok=True)
             link = wants / "oyo-firstboot.service"
