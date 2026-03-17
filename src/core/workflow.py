@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -36,8 +37,10 @@ class Workflow:
         self.device_service.check_required_commands()
         if not state.target_device:
             raise AppError("E201", "コピー先デバイスを指定してください")
+        self.device_service.validate_target_device(state.target_device)
         required = self.device_service.estimate_required_bytes("/")
         state.required_bytes = required
+        self.device_service.check_capacity(state.target_device, required)
 
     def run_create(self, state: ExecutionState) -> ExecutionState:
         return self._run(state, "create")
@@ -52,23 +55,30 @@ class Workflow:
             self.precheck(state)
             state.set_progress(20, "partition")
             efi, root = self.partition_service.prepare_device(state.target_device or "")
-            root_mount, _ = self.partition_service.make_filesystems_and_mount(efi, root, workdir)
+            root_mount, efi_mount = self.partition_service.make_filesystems_and_mount(efi, root, workdir)
+            state.mounted_paths.extend([str(efi_mount), str(root_mount)])
+
             state.set_progress(45, "copy")
             source = self.copy_service.resolve_source(mode, state.source_device)
             self.copy_service.rsync_copy(source, root_mount)
+
             root_uuid = self._blkid(root)
             efi_uuid = self._blkid(efi)
             self.copy_service.write_fstab(root_mount, root_uuid, efi_uuid)
+
             state.set_progress(70, "bootloader")
             self.boot_service.install_grub(root_mount, state.target_device or "")
             self.boot_service.update_initramfs(root_mount)
+
             state.set_progress(85, "firstboot")
             self.optimize_service.apply(root_mount)
             self.firstboot_service.install(root_mount)
+
             state.set_progress(100, "done")
             return state
         finally:
             self.cleanup(state)
+            shutil.rmtree(workdir, ignore_errors=True)
 
     def _blkid(self, part: str) -> str:
         result = self.device_service.runner.run(["blkid", "-s", "UUID", "-o", "value", part], check=False)
@@ -78,3 +88,4 @@ class Workflow:
         mounts = state.mounted_paths[:]
         for p in reversed(mounts):
             self.device_service.runner.run(["umount", "-lf", p], check=False)
+        state.mounted_paths.clear()

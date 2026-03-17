@@ -18,8 +18,25 @@ class CopyService:
         if mode == "create":
             return "/"
         if mode == "backup" and source_device:
-            return source_device
+            return self._validate_backup_source(source_device)
         raise AppError("E201", "コピー元が不正です")
+
+    def _validate_backup_source(self, source_path: str) -> str:
+        path = Path(source_path)
+        if not path.exists() or not path.is_dir():
+            raise AppError("E201", "backup 元はマウント済みのディレクトリを指定してください")
+
+        fstype = self.runner.run(["findmnt", "-n", "-o", "FSTYPE", "-T", str(path)], check=False).stdout.strip()
+        if fstype and fstype != "ext4":
+            raise AppError("E201", f"backup 元 filesystem が非対応です: {fstype}")
+
+        marker_files = [
+            path / "etc/fstab",
+            path / "etc/systemd/system/oyo-firstboot.service",
+        ]
+        if not all(m.exists() for m in marker_files):
+            raise AppError("E201", "backup 元が portable USB root と判定できません")
+        return str(path)
 
     def rsync_copy(self, source: str, target_root: Path) -> None:
         command = ["rsync", "-aHAX", "--delete"]
