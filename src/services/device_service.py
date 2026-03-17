@@ -75,11 +75,9 @@ class DeviceService:
         if target_device not in candidate_paths:
             raise AppError("E201", "コピー先デバイスが不正です（USB/リムーバブルのみ指定可）")
 
-    def estimate_required_bytes(self, source_path: str = "/") -> int:
-        st = os.statvfs(source_path)
-        used = (st.f_blocks - st.f_bfree) * st.f_frsize
-        required = int(used * 1.15) + (4 * 1024**3)
-        self.logger.info(f"容量見積: used={used} required={required}")
+    def estimate_required_bytes(self, copy_bytes: int) -> int:
+        required = int(copy_bytes * 1.15) + (4 * 1024**3)
+        self.logger.info(f"容量見積: copy_bytes={copy_bytes} required={required}")
         return required
 
     def check_capacity(self, target_device: str, required_bytes: int) -> None:

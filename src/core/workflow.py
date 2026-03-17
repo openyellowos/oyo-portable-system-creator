@@ -38,9 +38,12 @@ class Workflow:
         if not state.target_device:
             raise AppError("E201", "コピー先デバイスを指定してください")
         self.device_service.validate_target_device(state.target_device)
-        source = self.copy_service.resolve_source(state.mode, state.source_device)
-        state.metadata["source_path"] = source
-        required = self.device_service.estimate_required_bytes(source)
+        source_path = self.copy_service.resolve_source(state.mode, state.source_device)
+        state.metadata["source_path"] = source_path
+        copy_bytes = self.copy_service.estimate_copy_bytes(source_path, state.mode)
+        state.metadata["copy_bytes"] = copy_bytes
+        state.used_bytes = copy_bytes
+        required = self.device_service.estimate_required_bytes(copy_bytes)
         state.required_bytes = required
         self.device_service.check_capacity(state.target_device, required)
 
@@ -58,11 +61,11 @@ class Workflow:
             state.set_progress(20, "partition")
             efi, root = self.partition_service.prepare_device(state.target_device or "")
             root_mount, efi_mount = self.partition_service.make_filesystems_and_mount(efi, root, workdir)
-            state.mounted_paths.extend([str(efi_mount), str(root_mount)])
+            state.mounted_paths.extend([str(root_mount), str(efi_mount)])
 
             state.set_progress(45, "copy")
-            source = str(state.metadata.get("source_path") or self.copy_service.resolve_source(mode, state.source_device))
-            self.copy_service.rsync_copy(source, root_mount)
+            source_path = str(state.metadata.get("source_path") or self.copy_service.resolve_source(mode, state.source_device))
+            self.copy_service.rsync_copy(source_path, root_mount, mode)
 
             root_uuid = self._blkid(root)
             efi_uuid = self._blkid(efi)
