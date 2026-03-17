@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from PyQt6.QtCore import QObject, QThread, pyqtSignal
 from PyQt6.QtWidgets import QApplication, QHBoxLayout, QMainWindow, QPushButton, QStackedWidget, QVBoxLayout, QWidget
 
 from src.core.state import ExecutionState
@@ -7,11 +8,30 @@ from src.gui.wizard_pages import ConfirmPage, DonePage, ModePage, OptionPage, Ru
 from src.main import build_controller
 
 
+class WorkflowWorker(QObject):
+    finished = pyqtSignal(ExecutionState)
+    failed = pyqtSignal(str)
+
+    def __init__(self, state: ExecutionState, verbose: bool) -> None:
+        super().__init__()
+        self.state = state
+        self.verbose = verbose
+
+    def run(self) -> None:
+        try:
+            controller = build_controller(verbose=self.verbose)
+            result = controller.run(self.state)
+            self.finished.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("oyo-portable-system-creator")
-        self.controller = build_controller(verbose=False)
+        self.worker_thread: QThread | None = None
+        self.worker: WorkflowWorker | None = None
 
         self.mode_page = ModePage()
         self.source_page = SourcePage()
@@ -91,22 +111,38 @@ class MainWindow(QMainWindow):
         )
 
         self.stack.setCurrentWidget(self.running_page)
-        self._sync_buttons()
+        self.running_page.log.clear()
+        self.running_page.progress.setRange(0, 0)
         self.running_page.log.append("開始: workflow を実行します")
-
-        try:
-            self.controller.run(state)
-            self.running_page.progress.setValue(state.progress_percent)
-            self.running_page.log.append(f"完了: step={state.current_step} progress={state.progress_percent}%")
-            self.done_page.result.setText("成功: portable system 作成/バックアップが完了しました")
-        except Exception as exc:
-            self.running_page.log.append(f"失敗: {exc}")
-            self.done_page.result.setText(f"失敗: {exc}")
-
-        self.stack.setCurrentWidget(self.done_page)
         self.back_btn.setEnabled(False)
         self.next_btn.setEnabled(False)
         self.run_btn.setEnabled(False)
+
+        self.worker_thread = QThread(self)
+        self.worker = WorkflowWorker(state, verbose=self.option_page.verbose.isChecked())
+        self.worker.moveToThread(self.worker_thread)
+
+        self.worker_thread.started.connect(self.worker.run)
+        self.worker.finished.connect(self._on_workflow_finished)
+        self.worker.failed.connect(self._on_workflow_failed)
+        self.worker.finished.connect(self.worker_thread.quit)
+        self.worker.failed.connect(self.worker_thread.quit)
+        self.worker_thread.finished.connect(self.worker_thread.deleteLater)
+        self.worker_thread.start()
+
+    def _on_workflow_finished(self, state: ExecutionState) -> None:
+        self.running_page.progress.setRange(0, 100)
+        self.running_page.progress.setValue(state.progress_percent)
+        self.running_page.log.append(f"完了: step={state.current_step} progress={state.progress_percent}%")
+        self.done_page.result.setText("成功: portable system 作成/バックアップが完了しました")
+        self.stack.setCurrentWidget(self.done_page)
+
+    def _on_workflow_failed(self, message: str) -> None:
+        self.running_page.progress.setRange(0, 100)
+        self.running_page.progress.setValue(0)
+        self.running_page.log.append(f"失敗: {message}")
+        self.done_page.result.setText(f"失敗: {message}")
+        self.stack.setCurrentWidget(self.done_page)
 
 
 
