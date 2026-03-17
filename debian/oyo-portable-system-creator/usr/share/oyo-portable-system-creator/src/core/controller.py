@@ -8,10 +8,6 @@ class Controller:
     def __init__(self, workflow: Workflow) -> None:
         self.workflow = workflow
 
-    def validate(self, state: ExecutionState) -> ExecutionState:
-        self.workflow.precheck(state)
-        return state
-
     def run(self, state: ExecutionState) -> ExecutionState:
         if state.mode == "create":
             return self.workflow.run_create(state)

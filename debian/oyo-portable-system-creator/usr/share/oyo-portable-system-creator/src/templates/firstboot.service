@@ -1,0 +1,10 @@
+[Unit]
+Description=OYO Portable Firstboot
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/oyo-firstboot
+
+[Install]
+WantedBy=multi-user.target
