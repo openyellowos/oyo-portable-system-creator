@@ -23,7 +23,6 @@ REQUIRED_COMMANDS = [
     "chroot",
     "rsync",
     "grub-install",
-    "update-grub",
     "update-initramfs",
 ]
 

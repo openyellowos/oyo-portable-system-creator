@@ -30,5 +30,6 @@ src/bin/oyo-portable-system-creator
 ```bash
 python3 -m src.main create --help
 python3 -m src.main backup --help
+python3 -m unittest discover -s tests -v
 python3 -m compileall src
 ```

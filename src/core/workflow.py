@@ -72,7 +72,7 @@ class Workflow:
             self.copy_service.write_fstab(root_mount, root_uuid, efi_uuid)
 
             state.set_progress(70, "bootloader")
-            self.boot_service.install_grub(root_mount, state.target_device or "")
+            self.boot_service.install_grub(root_mount, state.target_device or "", root_uuid)
             self.boot_service.update_initramfs(root_mount)
 
             state.set_progress(85, "firstboot")
