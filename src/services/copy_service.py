@@ -40,7 +40,6 @@ CREATE_EXCLUDES = [
     "/usr/share/lintian/*",
     "/usr/share/man/*",
     "/usr/share/help/*",
-    "/usr/share/locale/*",
 ]
 
 HOME_DIRS_COPY_EMPTY = [

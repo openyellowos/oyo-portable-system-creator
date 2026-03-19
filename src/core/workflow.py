@@ -68,8 +68,10 @@ class Workflow:
             root_mount, efi_mount = self.partition_service.make_filesystems_and_mount(efi, root, workdir)
             state.mounted_paths.extend([str(root_mount), str(efi_mount)])
 
-            self._update_progress(state, 45, "システムをコピー")
+            self._update_progress(state, 45, "システムをコピー (1/2)")
             source_path = str(state.metadata.get("source_path") or self.copy_service.resolve_source(mode, state.source_device))
+            self.copy_service.rsync_copy(source_path, root_mount, mode)
+            self._update_progress(state, 55, "システムを再同期 (2/2)")
             self.copy_service.rsync_copy(source_path, root_mount, mode)
 
             self._update_progress(state, 60, "fstab を生成")
