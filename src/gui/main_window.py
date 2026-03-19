@@ -11,6 +11,7 @@ from src.main import build_controller
 class WorkflowWorker(QObject):
     finished = pyqtSignal(ExecutionState)
     failed = pyqtSignal(str)
+    progress = pyqtSignal(int, str)
 
     def __init__(self, state: ExecutionState, verbose: bool) -> None:
         super().__init__()
@@ -19,6 +20,7 @@ class WorkflowWorker(QObject):
 
     def run(self) -> None:
         try:
+            self.state.add_progress_listener(self.progress.emit)
             controller = build_controller(verbose=self.verbose)
             result = controller.run(self.state)
             self.finished.emit(result)
@@ -112,7 +114,8 @@ class MainWindow(QMainWindow):
 
         self.stack.setCurrentWidget(self.running_page)
         self.running_page.log.clear()
-        self.running_page.progress.setRange(0, 0)
+        self.running_page.progress.setRange(0, 100)
+        self.running_page.progress.setValue(0)
         self.running_page.log.append("開始: workflow を実行します")
         self.back_btn.setEnabled(False)
         self.next_btn.setEnabled(False)
@@ -123,12 +126,17 @@ class MainWindow(QMainWindow):
         self.worker.moveToThread(self.worker_thread)
 
         self.worker_thread.started.connect(self.worker.run)
+        self.worker.progress.connect(self._on_workflow_progress)
         self.worker.finished.connect(self._on_workflow_finished)
         self.worker.failed.connect(self._on_workflow_failed)
         self.worker.finished.connect(self.worker_thread.quit)
         self.worker.failed.connect(self.worker_thread.quit)
         self.worker_thread.finished.connect(self.worker_thread.deleteLater)
         self.worker_thread.start()
+
+    def _on_workflow_progress(self, percent: int, step: str) -> None:
+        self.running_page.progress.setValue(percent)
+        self.running_page.log.append(f"{percent:>3}% {step}")
 
     def _on_workflow_finished(self, state: ExecutionState) -> None:
         self.running_page.progress.setRange(0, 100)

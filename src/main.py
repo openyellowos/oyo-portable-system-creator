@@ -28,7 +28,7 @@ def build_controller(verbose: bool) -> Controller:
     boot = BootService(runner, chroot)
     optimize = OptimizeService()
     firstboot = FirstbootService()
-    workflow = Workflow(device, partition, copy, boot, optimize, firstboot)
+    workflow = Workflow(device, partition, copy, boot, optimize, firstboot, logger)
     return Controller(workflow)
 
 
