@@ -46,27 +46,28 @@ CREATE_EXCLUDES = [
     "/opt/google/*",
     "/opt/wine-stable/*",
     "/opt/CSV+/*",
-    "/home/*/.local/share/*",
-    "/home/*/.var/*",
-    "/home/*/.config/google-chrome/*",
-    "/home/*/.config/Code/*",
-    "/home/*/.config/voicevox/*",
-    "/home/*/.wine/*",
-    "/home/*/.minecraft/*",
-    "/home/*/.vscode/*",
-    "/home/*/.mozilla/*",
-    "/home/*/.thunderbird/*",
-    "/home/*/.voicevox/*",
-    "/home/*/Downloads/*",
-    "/home/*/ダウンロード/*",
-    "/home/*/Videos/*",
-    "/home/*/ビデオ/*",
-    "/home/*/Pictures/*",
-    "/home/*/画像/*",
-    "/home/*/Music/*",
-    "/home/*/音楽/*",
-    "/home/*/work/*",
-    "/home/*/old/*",
+]
+
+HOME_DIRS_COPY_EMPTY = [
+    "Downloads",
+    "ダウンロード",
+    "Documents",
+    "ドキュメント",
+    "Desktop",
+    "デスクトップ",
+    "Public",
+    "公開",
+    "Videos",
+    "ビデオ",
+    "Music",
+    "音楽",
+    "Pictures",
+    "画像",
+]
+
+HOME_DIRS_COPY_FULL = [
+    "Templates",
+    "テンプレート",
 ]
 
 
@@ -126,6 +127,8 @@ class CopyService:
             command.extend(["--dry-run", "--stats"])
         for pattern in self._exclude_patterns_for_mode(mode):
             command.extend(["--exclude", pattern])
+        for rule in self._filter_rules_for_mode(mode):
+            command.extend(["--filter", rule])
         command.extend([f"{source.rstrip('/')}/", target])
         return command
 
@@ -133,6 +136,41 @@ class CopyService:
         if mode == "create":
             return [*COMMON_EXCLUDES, *CREATE_EXCLUDES]
         return COMMON_EXCLUDES
+
+    def _filter_rules_for_mode(self, mode: str) -> list[str]:
+        if mode == "create":
+            return self._create_home_filter_rules()
+        return []
+
+    def _create_home_filter_rules(self) -> list[str]:
+        rules = [
+            "+ /home/",
+            "+ /home/*/",
+            "- /home/*/.cache/***",
+            "- /home/*/.local/share/Trash/***",
+            "+ /home/*/.*/",
+            "+ /home/*/.*/***",
+            "+ /home/*/.*",
+        ]
+
+        for directory in HOME_DIRS_COPY_EMPTY:
+            rules.extend(
+                [
+                    f"+ /home/*/{directory}/",
+                    f"- /home/*/{directory}/***",
+                ]
+            )
+
+        for directory in HOME_DIRS_COPY_FULL:
+            rules.extend(
+                [
+                    f"+ /home/*/{directory}/",
+                    f"+ /home/*/{directory}/***",
+                ]
+            )
+
+        rules.append("- /home/*/*")
+        return rules
 
     def _parse_total_transferred_file_size(self, stdout: str, stderr: str) -> int:
         output = "\n".join(part for part in (stdout, stderr) if part)
