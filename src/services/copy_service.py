@@ -31,10 +31,8 @@ CREATE_EXCLUDES = [
     "/var/log/*",
     "/var/backups/*",
     "/var/lib/apt/*",
-    "/var/lib/flatpak/*",
     "/var/lib/docker/*",
     "/var/lib/containers/*",
-    "/var/lib/snapd/*",
     "/usr/include/*",
     "/usr/src/*",
     "/usr/share/doc/*",
@@ -43,9 +41,6 @@ CREATE_EXCLUDES = [
     "/usr/share/man/*",
     "/usr/share/help/*",
     "/usr/share/locale/*",
-    "/opt/google/*",
-    "/opt/wine-stable/*",
-    "/opt/CSV+/*",
 ]
 
 HOME_DIRS_COPY_EMPTY = [

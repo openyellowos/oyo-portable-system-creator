@@ -41,6 +41,11 @@ class CopyServiceTests(unittest.TestCase):
         self.assertNotIn("/home/*/.mozilla/*", excludes)
         self.assertNotIn("/home/*/.local/share/*", excludes)
         self.assertNotIn("/home/*/.config/google-chrome/*", excludes)
+        self.assertNotIn("/opt/google/*", excludes)
+        self.assertNotIn("/opt/wine-stable/*", excludes)
+        self.assertNotIn("/opt/CSV+/*", excludes)
+        self.assertNotIn("/var/lib/flatpak/*", excludes)
+        self.assertNotIn("/var/lib/snapd/*", excludes)
         self.assertIn("/home/*/.cache/*", excludes)
         self.assertIn("/home/*/.local/share/Trash/*", excludes)
 
