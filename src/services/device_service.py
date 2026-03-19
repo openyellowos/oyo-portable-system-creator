@@ -76,12 +76,21 @@ class DeviceService:
 
     def estimate_required_bytes(self, copy_bytes: int) -> int:
         required = int(copy_bytes * 1.15) + (4 * 1024**3)
-        self.logger.info(f"容量見積: copy_bytes={copy_bytes} required={required}")
+        self.logger.info(
+            "容量見積: "
+            f"copy={self._format_gib(copy_bytes)} "
+            f"required={self._format_gib(required)}"
+        )
         return required
 
     def check_capacity(self, target_device: str, required_bytes: int) -> None:
         size = self.get_device_size_bytes(target_device)
-        self.logger.info(f"容量確認: target={target_device} size={size} required={required_bytes}")
+        self.logger.info(
+            "容量確認: "
+            f"target={target_device} "
+            f"size={self._format_gib(size)} "
+            f"required={self._format_gib(required_bytes)}"
+        )
         if size < required_bytes:
             raise AppError("E202", f"容量不足です: required={required_bytes}, device={size}")
 
@@ -109,3 +118,8 @@ class DeviceService:
             if root_source[-1].isdigit():
                 return root_source.rstrip("0123456789")
         return root_source
+
+    @staticmethod
+    def _format_gib(size_bytes: int) -> str:
+        gib = size_bytes / (1024**3)
+        return f"{gib:.1f} GiB"
