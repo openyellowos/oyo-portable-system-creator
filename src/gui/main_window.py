@@ -335,7 +335,6 @@ class MainWindow(QMainWindow):
 
     def _format_diagnostic_result(self, state: ExecutionState) -> str:
         source = state.metadata.get("source_path") or "/"
-        used_gib = state.used_bytes / (1024**3) if state.used_bytes else 0
         required_gib = state.required_bytes / (1024**3) if state.required_bytes else 0
 
         lines = [
@@ -348,7 +347,6 @@ class MainWindow(QMainWindow):
             f"  {state.target_device}",
             "",
             "見積",
-            f"  使用量: {used_gib:.1f} GiB",
             f"  必要容量: {required_gib:.1f} GiB",
             "",
             "確認項目",
@@ -359,6 +357,20 @@ class MainWindow(QMainWindow):
             "  ✓ 容量",
         ]
         return "\n".join(lines)
+
+    def _show_message_dialog(
+        self,
+        title: str,
+        text: str,
+        icon: QMessageBox.Icon = QMessageBox.Icon.Information,
+    ) -> None:
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle(title)
+        dialog.setIcon(icon)
+        dialog.setText(text)
+        dialog.setStandardButtons(QMessageBox.StandardButton.Ok)
+        dialog.setStyleSheet("QLabel{min-width: 360px;}")
+        dialog.exec()
 
     def _on_device_changed(self, _index: int) -> None:
         self._invalidate_diagnostic()
@@ -466,7 +478,7 @@ class MainWindow(QMainWindow):
             f"required={state.required_bytes}"
         )
         self._set_status("診断が完了しました。")
-        QMessageBox.information(self, "診断結果", diagnostic_text)
+        self._show_message_dialog("診断結果", diagnostic_text)
         self._update_action_state()
 
     def _on_create_finished(self, state: ExecutionState) -> None:
@@ -474,7 +486,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(100)
         self.progress_bar.setFormat("作成完了")
         self._set_status("Portable USB の作成が完了しました。")
-        QMessageBox.information(self, "完了", "Portable USB の作成が完了しました。")
+        self._show_message_dialog("完了", "Portable USB の作成が完了しました。")
 
     def _on_progress(self, percent: int, step: str) -> None:
         self.progress_bar.setFormat("%p%")
