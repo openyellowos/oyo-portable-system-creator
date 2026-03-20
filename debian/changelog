@@ -1,3 +1,9 @@
+oyo-portable-system-creator (0.2.0) UNRELEASED; urgency=medium
+
+  * debパッケージ化
+
+ -- toshio <solution92001@gmail.com>  Fri, 20 Mar 2026 17:07:51 +0900
+
 oyo-portable-system-creator (0.1.0-1) unstable; urgency=medium
 
   * Initial v1 implementation skeleton.
