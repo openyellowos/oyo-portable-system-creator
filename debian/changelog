@@ -1,4 +1,10 @@
-oyo-portable-system-creator (0.2.0) UNRELEASED; urgency=medium
+oyo-portable-system-creator (0.3.0) UNRELEASED; urgency=medium
+
+  * githubワークフロー  自動ビルド対応
+
+ -- toshio <solution92001@gmail.com>  Fri, 20 Mar 2026 17:53:24 +0900
+
+oyo-portable-system-creator (0.2.0) unstable; urgency=medium
 
   * debパッケージ化
 
