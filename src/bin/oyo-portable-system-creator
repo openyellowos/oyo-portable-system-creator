@@ -1,3 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "${script_dir}/../.." && pwd)"
+
+if [[ "$(id -u)" -ne 0 ]]; then
+  exec pkexec env \
+    DISPLAY="${DISPLAY:-}" \
+    XAUTHORITY="${XAUTHORITY:-${HOME}/.Xauthority}" \
+    PYTHONPATH="${repo_root}${PYTHONPATH:+:${PYTHONPATH}}" \
+    python3 -c 'from src.gui.main_window import run_gui; raise SystemExit(run_gui())'
+fi
+
+cd "${repo_root}"
+export PYTHONPATH="${repo_root}${PYTHONPATH:+:${PYTHONPATH}}"
 exec python3 -c 'from src.gui.main_window import run_gui; raise SystemExit(run_gui())'

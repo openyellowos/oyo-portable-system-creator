@@ -46,6 +46,7 @@ class CopyServiceTests(unittest.TestCase):
         self.assertNotIn("/opt/CSV+/*", excludes)
         self.assertNotIn("/var/lib/flatpak/*", excludes)
         self.assertNotIn("/var/lib/snapd/*", excludes)
+        self.assertNotIn("/usr/share/locale/*", excludes)
         self.assertIn("/home/*/.cache/*", excludes)
         self.assertIn("/home/*/.local/share/Trash/*", excludes)
 
