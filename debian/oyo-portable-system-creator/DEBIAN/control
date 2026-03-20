@@ -2,8 +2,8 @@ Package: oyo-portable-system-creator
 Version: 0.1.0-1
 Architecture: all
 Maintainer: OYO Team <devnull@example.com>
-Installed-Size: 73
-Depends: python3-pyqt6, rsync, grub-pc-bin, grub-efi-amd64-bin
+Installed-Size: 119
+Depends: python3:any, python3-pyqt6, rsync, grub-pc-bin, grub-efi-amd64-bin
 Section: utils
 Priority: optional
 Description: Portable system creator for open.Yellow.os

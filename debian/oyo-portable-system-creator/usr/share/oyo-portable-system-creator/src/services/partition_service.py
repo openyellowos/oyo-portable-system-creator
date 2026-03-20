@@ -16,25 +16,30 @@ class PartitionService:
     def prepare_device(self, device: str) -> tuple[str, str]:
         try:
             self.unmount_device(device)
+            self._clear_device_signatures(device)
             self.runner.run(["parted", "-s", device, "mklabel", "gpt"])
-            self.runner.run(["parted", "-s", device, "mkpart", "ESP", "fat32", "1MiB", "513MiB"])
-            self.runner.run(["parted", "-s", device, "set", "1", "esp", "on"])
-            self.runner.run(["parted", "-s", device, "mkpart", "root", "ext4", "513MiB", "100%"])
+            self.runner.run(["parted", "-s", device, "mkpart", "BIOSBOOT", "1MiB", "3MiB"])
+            self.runner.run(["parted", "-s", device, "set", "1", "bios_grub", "on"])
+            self.runner.run(["parted", "-s", device, "mkpart", "ESP", "fat32", "3MiB", "515MiB"])
+            self.runner.run(["parted", "-s", device, "set", "2", "esp", "on"])
+            self.runner.run(["parted", "-s", device, "mkpart", "root", "ext4", "515MiB", "100%"])
             self.runner.run(["partprobe", device], check=False)
             time.sleep(1)
         except Exception as exc:
             raise AppError("E301", f"パーティション作成失敗: {exc}") from exc
 
         suffix = "p" if device.startswith("/dev/nvme") or device.startswith("/dev/mmcblk") else ""
-        efi = f"{device}{suffix}1"
-        root = f"{device}{suffix}2"
+        efi = f"{device}{suffix}2"
+        root = f"{device}{suffix}3"
         return efi, root
+
+    def _clear_device_signatures(self, device: str) -> None:
+        self.runner.run(["dd", "if=/dev/zero", f"of={device}", "bs=1M", "count=16", "conv=fsync"], check=True)
 
     def make_filesystems_and_mount(self, efi_part: str, root_part: str, workdir: Path) -> tuple[Path, Path]:
         root_mount = workdir / "root"
         efi_mount = root_mount / "boot/efi"
         root_mount.mkdir(parents=True, exist_ok=True)
-        efi_mount.mkdir(parents=True, exist_ok=True)
         try:
             self.runner.run(["mkfs.vfat", "-F", "32", "-n", "OYOPORT_EFI", efi_part])
             self.runner.run(["mkfs.ext4", "-F", "-L", "OYOPORT_ROOT", root_part])
@@ -42,10 +47,12 @@ class PartitionService:
             raise AppError("E302", f"mkfs 失敗: {exc}") from exc
         try:
             self.runner.run(["mount", root_part, str(root_mount)])
+            efi_mount.mkdir(parents=True, exist_ok=True)
             self.runner.run(["mount", efi_part, str(efi_mount)])
         except Exception as exc:
             raise AppError("E303", f"mount 失敗: {exc}") from exc
         return root_mount, efi_mount
 
     def unmount_device(self, device: str) -> None:
-        self.runner.run(["bash", "-lc", f"mount | awk '$1 ~ /^{device}/ {{print $3}}' | xargs -r -n1 umount"], check=False)
+        escaped = device.replace("/", "\\/")
+        self.runner.run(["bash", "-lc", f"mount | awk '$1 ~ /^{escaped}/ {{print $3}}' | xargs -r -n1 umount"], check=False)

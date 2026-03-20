@@ -28,7 +28,7 @@ def build_controller(verbose: bool) -> Controller:
     boot = BootService(runner, chroot)
     optimize = OptimizeService()
     firstboot = FirstbootService()
-    workflow = Workflow(device, partition, copy, boot, optimize, firstboot)
+    workflow = Workflow(device, partition, copy, boot, optimize, firstboot, logger)
     return Controller(workflow)
 
 
@@ -60,11 +60,16 @@ def run_cli(argv: list[str] | None = None) -> int:
         options={"yes": args.yes, "force": args.force, "dry_run": args.dry_run},
     )
 
-    if args.dry_run:
-        print(f"dry-run: mode={state.mode} target={state.target_device} source={state.source_device}")
-        return 0
-
     try:
+        if args.dry_run:
+            controller.validate(state)
+            resolved_source = state.metadata.get("source_path")
+            print(
+                f"dry-run OK: mode={state.mode} target={state.target_device} "
+                f"source={resolved_source} required_bytes={state.required_bytes}"
+            )
+            return 0
+
         controller.run(state)
         print("completed")
         return 0

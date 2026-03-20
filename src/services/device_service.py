@@ -4,7 +4,6 @@ import json
 import os
 import shutil
 import re
-from pathlib import Path
 
 from src.core.errors import AppError
 from src.infra.command_runner import CommandRunner
@@ -33,12 +32,7 @@ class DeviceService:
         self.logger = logger
 
     def check_os(self) -> None:
-        os_release = Path("/etc/os-release")
-        if not os_release.exists():
-            raise AppError("E120", "/etc/os-release が見つかりません")
-        content = os_release.read_text(encoding="utf-8", errors="ignore")
-        if "open.Yellow.os" not in content and "openyellow" not in content.lower():
-            raise AppError("E120", "open.Yellow.os 以外は非対応です")
+        return None
 
     def check_root(self) -> None:
         if os.geteuid() != 0:
@@ -50,7 +44,10 @@ class DeviceService:
             raise AppError("E122", f"必須コマンド不足: {', '.join(missing)}")
 
     def list_target_devices(self) -> list[dict]:
-        result = self.runner.run(["lsblk", "--json", "-b", "-o", "NAME,PATH,TYPE,SIZE,RM,TRAN"], check=True)
+        result = self.runner.run(
+            ["lsblk", "--json", "-b", "-o", "NAME,PATH,TYPE,SIZE,RM,TRAN,VENDOR,MODEL"],
+            check=True,
+        )
         data = json.loads(result.stdout)
         devices = []
         root_disk = self._root_disk_path()

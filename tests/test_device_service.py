@@ -42,6 +42,9 @@ class DeviceServiceTests(unittest.TestCase):
             "容量確認: target=/dev/sdb size=119.2 GiB required=106.3 GiB",
         )
 
+    def test_check_os_does_not_require_openyellow(self) -> None:
+        self.service.check_os()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 from dataclasses import dataclass
 
@@ -36,10 +37,12 @@ class CommandRunner:
             stdout=completed.stdout,
             stderr=completed.stderr,
         )
-        if result.stdout.strip():
-            self.logger.debug(result.stdout.strip())
-        if result.stderr.strip():
-            self.logger.debug(result.stderr.strip())
+        sanitized_stdout = self._sanitize_output_for_log(result.stdout)
+        sanitized_stderr = self._sanitize_output_for_log(result.stderr)
+        if sanitized_stdout:
+            self.logger.debug(sanitized_stdout)
+        if sanitized_stderr:
+            self.logger.debug(sanitized_stderr)
         if check and result.returncode != 0:
             raise AppError("E999", f"Command failed: {' '.join(masked)}")
         return result
@@ -53,3 +56,10 @@ class CommandRunner:
                 replaced = replaced.replace(m, "***")
             out.append(replaced)
         return out
+
+    @staticmethod
+    def _sanitize_output_for_log(text: str) -> str:
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        normalized = re.sub(r"[^\S\n\t]+", " ", normalized)
+        normalized = "".join(ch for ch in normalized if ch in "\n\t" or ch.isprintable())
+        return normalized.strip()

@@ -33,3 +33,10 @@ python3 -m src.main backup --help
 python3 -m unittest discover -s tests -v
 python3 -m compileall src
 ```
+
+## Debian パッケージ作成
+
+```bash
+sudo apt install build-essential debhelper dh-python python3 python3-pyqt6
+dpkg-buildpackage -us -uc -b
+```

@@ -1,3 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+resolve_app_root() {
+  if [[ -d "${script_dir}/../share/oyo-portable-system-creator/src" ]]; then
+    cd -- "${script_dir}/../share/oyo-portable-system-creator" && pwd
+    return
+  fi
+  if [[ -d "${script_dir}/../src" ]]; then
+    cd -- "${script_dir}/../.." && pwd
+    return
+  fi
+  echo "/usr/share/oyo-portable-system-creator"
+}
+
+app_root="$(resolve_app_root)"
+
+if [[ "$(id -u)" -ne 0 ]]; then
+  exec pkexec env \
+    DISPLAY="${DISPLAY:-}" \
+    XAUTHORITY="${XAUTHORITY:-${HOME}/.Xauthority}" \
+    PYTHONPATH="${app_root}${PYTHONPATH:+:${PYTHONPATH}}" \
+    python3 -c 'from src.gui.main_window import run_gui; raise SystemExit(run_gui())'
+fi
+
+cd "${app_root}"
+export PYTHONPATH="${app_root}${PYTHONPATH:+:${PYTHONPATH}}"
 exec python3 -c 'from src.gui.main_window import run_gui; raise SystemExit(run_gui())'

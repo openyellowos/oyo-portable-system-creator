@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<policyconfig>
+  <action id="jp.openyellowos.oyo-portable-system-creator.run">
+    <description>Run OYO Portable System Creator</description>
+    <message>Authentication is required to create portable USB system</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+</policyconfig>

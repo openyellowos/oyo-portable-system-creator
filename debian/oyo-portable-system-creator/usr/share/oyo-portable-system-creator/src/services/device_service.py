@@ -4,7 +4,6 @@ import json
 import os
 import shutil
 import re
-from pathlib import Path
 
 from src.core.errors import AppError
 from src.infra.command_runner import CommandRunner
@@ -23,7 +22,6 @@ REQUIRED_COMMANDS = [
     "chroot",
     "rsync",
     "grub-install",
-    "update-grub",
     "update-initramfs",
 ]
 
@@ -34,12 +32,7 @@ class DeviceService:
         self.logger = logger
 
     def check_os(self) -> None:
-        os_release = Path("/etc/os-release")
-        if not os_release.exists():
-            raise AppError("E120", "/etc/os-release が見つかりません")
-        content = os_release.read_text(encoding="utf-8", errors="ignore")
-        if "open.Yellow.os" not in content and "openyellow" not in content.lower():
-            raise AppError("E120", "open.Yellow.os 以外は非対応です")
+        return None
 
     def check_root(self) -> None:
         if os.geteuid() != 0:
@@ -51,7 +44,10 @@ class DeviceService:
             raise AppError("E122", f"必須コマンド不足: {', '.join(missing)}")
 
     def list_target_devices(self) -> list[dict]:
-        result = self.runner.run(["lsblk", "--json", "-b", "-o", "NAME,PATH,TYPE,SIZE,RM,TRAN"], check=True)
+        result = self.runner.run(
+            ["lsblk", "--json", "-b", "-o", "NAME,PATH,TYPE,SIZE,RM,TRAN,VENDOR,MODEL"],
+            check=True,
+        )
         data = json.loads(result.stdout)
         devices = []
         root_disk = self._root_disk_path()
@@ -75,16 +71,23 @@ class DeviceService:
         if target_device not in candidate_paths:
             raise AppError("E201", "コピー先デバイスが不正です（USB/リムーバブルのみ指定可）")
 
-    def estimate_required_bytes(self, source_path: str = "/") -> int:
-        st = os.statvfs(source_path)
-        used = (st.f_blocks - st.f_bfree) * st.f_frsize
-        required = int(used * 1.15) + (4 * 1024**3)
-        self.logger.info(f"容量見積: used={used} required={required}")
+    def estimate_required_bytes(self, copy_bytes: int) -> int:
+        required = int(copy_bytes * 1.15) + (4 * 1024**3)
+        self.logger.info(
+            "容量見積: "
+            f"copy={self._format_gib(copy_bytes)} "
+            f"required={self._format_gib(required)}"
+        )
         return required
 
     def check_capacity(self, target_device: str, required_bytes: int) -> None:
         size = self.get_device_size_bytes(target_device)
-        self.logger.info(f"容量確認: target={target_device} size={size} required={required_bytes}")
+        self.logger.info(
+            "容量確認: "
+            f"target={target_device} "
+            f"size={self._format_gib(size)} "
+            f"required={self._format_gib(required_bytes)}"
+        )
         if size < required_bytes:
             raise AppError("E202", f"容量不足です: required={required_bytes}, device={size}")
 
@@ -112,3 +115,8 @@ class DeviceService:
             if root_source[-1].isdigit():
                 return root_source.rstrip("0123456789")
         return root_source
+
+    @staticmethod
+    def _format_gib(size_bytes: int) -> str:
+        gib = size_bytes / (1024**3)
+        return f"{gib:.1f} GiB"

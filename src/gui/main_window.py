@@ -143,6 +143,7 @@ class MainWindow(QMainWindow):
         self.worker: QObject | None = None
         self.current_worker_kind: str | None = None
         self.device_paths: list[str] = []
+        self.device_records: dict[str, dict] = {}
         self.doctor_ok = False
         self.last_doctor_device = ""
 
@@ -150,19 +151,24 @@ class MainWindow(QMainWindow):
         self.status_label.setObjectName("StatusLabel")
 
         self.description_label = QLabel(
-            "open.Yellow.os の現在のシステムから、BIOS / UEFI 両対応の Portable USB を作成します。"
+            "現在のシステムから、BIOS / UEFI 両対応の Portable USB を作成します。"
         )
         self.description_label.setWordWrap(True)
         self.description_label.setObjectName("DescriptionLabel")
 
+        self.device_label = QLabel("USBデバイス")
+        self.device_label.setFixedWidth(84)
+
         self.device_combo = QComboBox()
-        self.device_combo.setMinimumWidth(520)
+        self.device_combo.setMinimumWidth(440)
         self.device_combo.currentIndexChanged.connect(self._on_device_changed)
 
         self.reload_button = QPushButton("再読込")
+        self.reload_button.setFixedWidth(104)
         self.reload_button.clicked.connect(self.reload_devices)
 
         self.diagnose_button = QPushButton("診断")
+        self.diagnose_button.setFixedWidth(104)
         self.diagnose_button.clicked.connect(self.run_diagnostic)
 
         self.create_button = QPushButton("Portable USB 作成")
@@ -191,17 +197,17 @@ class MainWindow(QMainWindow):
         outer.setSpacing(12)
 
         outer.addWidget(self.description_label)
-        outer.addWidget(self.status_label)
 
         device_frame = QFrame()
         device_frame.setObjectName("Panel")
         device_layout = QGridLayout(device_frame)
         device_layout.setContentsMargins(12, 12, 12, 12)
-        device_layout.setHorizontalSpacing(12)
+        device_layout.setHorizontalSpacing(8)
         device_layout.setVerticalSpacing(4)
-        device_layout.addWidget(QLabel("USBデバイス"), 0, 0)
+        device_layout.addWidget(self.device_label, 0, 0)
         device_layout.addWidget(self.device_combo, 0, 1)
         device_layout.addWidget(self.reload_button, 0, 2)
+        device_layout.setColumnStretch(1, 1)
         outer.addWidget(device_frame)
 
         action_row = QHBoxLayout()
@@ -211,6 +217,7 @@ class MainWindow(QMainWindow):
         action_row.addStretch(1)
         outer.addLayout(action_row)
 
+        outer.addWidget(self.status_label)
         outer.addWidget(self.progress_bar)
 
         log_frame = QFrame()
@@ -226,33 +233,34 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(
             """
             QWidget {
-                background: #ffffff;
-                color: #2f3943;
+                background: #eeece9;
+                color: #111111;
                 font-family: "Noto Sans CJK JP", "Noto Sans JP", sans-serif;
                 font-size: 14px;
             }
             QMainWindow {
-                background: #ffffff;
+                background: #eeece9;
             }
             #StatusLabel {
-                color: #4d5966;
+                color: #111111;
+                padding-top: 2px;
                 padding-bottom: 2px;
+                min-height: 20px;
             }
             #DescriptionLabel {
-                color: #3b4650;
-                background: #ffffff;
-                border: 1px solid #d8dee5;
-                border-radius: 10px;
-                padding: 10px 14px;
+                color: #111111;
+                background: transparent;
+                border: none;
+                padding: 0;
             }
             #Panel {
-                background: #ffffff;
-                border: 1px solid #d8dee5;
+                background: #f1efec;
+                border: 1px solid #d7d1ca;
                 border-radius: 10px;
             }
             QComboBox, QTextEdit {
-                background: #ffffff;
-                border: 1px solid #c9d1da;
+                background: #fbfaf8;
+                border: 1px solid #cfc8c0;
                 border-radius: 8px;
                 padding: 8px;
             }
@@ -265,36 +273,36 @@ class MainWindow(QMainWindow):
                 width: 28px;
             }
             QProgressBar {
-                background: #f4f6f8;
-                border: 1px solid #d8dee5;
+                background: #e2ddd6;
+                border: 1px solid #d0c8bf;
                 border-radius: 8px;
                 text-align: center;
-                color: #4d5966;
+                color: #111111;
                 min-height: 22px;
             }
             QProgressBar::chunk {
-                background: #a9c4ff;
+                background: #9fb9ef;
                 border-radius: 7px;
             }
             QPushButton {
-                background: #f5f7fa;
-                border: 1px solid #cdd6e0;
+                background: #f7f4f0;
+                border: 1px solid #d1c9c0;
                 border-radius: 8px;
-                color: #324150;
+                color: #111111;
                 font-weight: 500;
                 padding: 7px 14px;
                 min-height: 18px;
             }
             QPushButton:hover {
-                background: #edf2f7;
+                background: #efeae3;
             }
             QPushButton:disabled {
-                background: #f7f8fa;
-                border-color: #dde3ea;
-                color: #9aa6b2;
+                background: #f3f0eb;
+                border-color: #dcd5cc;
+                color: #a7a099;
             }
             QTextEdit {
-                selection-background-color: #cfe1ff;
+                selection-background-color: #cddbf8;
             }
             """
         )
@@ -314,6 +322,12 @@ class MainWindow(QMainWindow):
             return None
         return self.device_paths[index]
 
+    def _selected_device_record(self) -> dict | None:
+        path = self._selected_device()
+        if path is None:
+            return None
+        return self.device_records.get(path)
+
     def _append_log(self, message: str) -> None:
         self.log_view.append(message)
 
@@ -330,12 +344,22 @@ class MainWindow(QMainWindow):
     def _format_device_label(self, device: dict) -> str:
         path = device.get("path") or f"/dev/{device['name']}"
         size = int(device.get("size") or 0) / (1024**3)
-        tran = device.get("tran") or "unknown"
-        return f"{path}   {size:.1f} GiB   {tran}"
+        device_name = self._device_name(device)
+        if device_name:
+            return f"{path}({device_name})   {size:.1f}GiB"
+        return f"{path}   {size:.1f}GiB"
+
+    def _device_name(self, device: dict | None) -> str:
+        if not device:
+            return ""
+        vendor = str(device.get("vendor") or "").strip()
+        model = str(device.get("model") or "").strip()
+        return " ".join(part for part in [vendor, model] if part).strip()
 
     def _format_diagnostic_result(self, state: ExecutionState) -> str:
         source = state.metadata.get("source_path") or "/"
         required_gib = state.required_bytes / (1024**3) if state.required_bytes else 0
+        target_display = self._format_device_display_from_path(state.target_device or "")
 
         lines = [
             "診断結果: OK",
@@ -344,17 +368,9 @@ class MainWindow(QMainWindow):
             f"  {source}",
             "",
             "USBデバイス",
-            f"  {state.target_device}",
+            f"  {target_display}",
             "",
-            "見積",
             f"  必要容量: {required_gib:.1f} GiB",
-            "",
-            "確認項目",
-            "  ✓ open.Yellow.os",
-            "  ✓ root 権限",
-            "  ✓ 必須コマンド",
-            "  ✓ USBデバイス",
-            "  ✓ 容量",
         ]
         return "\n".join(lines)
 
@@ -369,7 +385,11 @@ class MainWindow(QMainWindow):
         dialog.setIcon(icon)
         dialog.setText(text)
         dialog.setStandardButtons(QMessageBox.StandardButton.Ok)
-        dialog.setStyleSheet("QLabel{min-width: 360px;}")
+        label = dialog.findChild(QLabel, "qt_msgbox_label")
+        if label is not None:
+            label.setWordWrap(True)
+            label.setMinimumWidth(0)
+            label.setMaximumWidth(280)
         dialog.exec()
 
     def _on_device_changed(self, _index: int) -> None:
@@ -398,17 +418,23 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "診断未完了", "先に診断を実行し、結果を確認してください。")
             return
 
-        answer = QMessageBox.question(
-            self,
-            "確認",
-            (
-                "選択したUSBデバイスの内容はすべて消去されます。\n\n"
-                f"USBデバイス:\n  {target}\n\n"
-                "Portable System を作成します。続行しますか？"
-            ),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("確認")
+        dialog.setIcon(QMessageBox.Icon.Question)
+        dialog.setText(
+            "選択したUSBデバイスの内容はすべて消去されます。\n\n"
+            f"USBデバイス: {self._format_selected_device_display(target)}\n\n"
+            "Portable System を作成します。続行しますか？"
         )
+        dialog.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        dialog.setDefaultButton(QMessageBox.StandardButton.No)
+        yes_button = dialog.button(QMessageBox.StandardButton.Yes)
+        no_button = dialog.button(QMessageBox.StandardButton.No)
+        if yes_button is not None:
+            yes_button.setText("はい")
+        if no_button is not None:
+            no_button.setText("いいえ")
+        answer = QMessageBox.StandardButton(dialog.exec())
         if answer != QMessageBox.StandardButton.Yes:
             return
 
@@ -450,17 +476,19 @@ class MainWindow(QMainWindow):
     def _on_devices_loaded(self, devices: list[dict]) -> None:
         self.device_combo.clear()
         self.device_paths = []
+        self.device_records = {}
 
         for device in devices:
             path = device.get("path") or f"/dev/{device['name']}"
             label = self._format_device_label(device)
             self.device_combo.addItem(label)
             self.device_paths.append(path)
+            self.device_records[path] = device
 
         if not devices:
             self._set_status("使用可能な USB デバイスがありません。")
         else:
-            self._set_status("USBデバイスを選択して診断または作成を実行してください。")
+            self._set_status("")
         self._update_action_state()
 
     def _on_diagnostic_finished(self, state: ExecutionState) -> None:
@@ -506,6 +534,15 @@ class MainWindow(QMainWindow):
         self.worker_thread = None
         self.current_worker_kind = None
         self._update_action_state()
+
+    def _format_selected_device_display(self, target: str) -> str:
+        return self._format_device_display_from_path(target)
+
+    def _format_device_display_from_path(self, target: str) -> str:
+        device_name = self._device_name(self.device_records.get(target))
+        if not device_name:
+            return target
+        return f"{target} ({device_name})"
 
 
 def run_gui() -> int:
