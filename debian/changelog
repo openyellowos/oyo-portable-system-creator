@@ -1,4 +1,10 @@
-oyo-portable-system-creator (0.3.3) UNRELEASED; urgency=medium
+oyo-portable-system-creator (0.3.4) UNRELEASED; urgency=medium
+
+  * 作成したUSBメモリから起動した時に、画面がまっくろになってしまう不具合を修正
+
+ -- toshio <solution92001@gmail.com>  Sun, 22 Mar 2026 20:23:52 +0900
+
+oyo-portable-system-creator (0.3.3) unstable; urgency=medium
 
   * USB書き込み中にエラーが発生する問題を修正 
 
