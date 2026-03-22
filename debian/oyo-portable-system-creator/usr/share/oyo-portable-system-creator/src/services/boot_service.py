@@ -30,6 +30,17 @@ class BootService:
                     target_device,
                 ],
             )
+            self.chroot.run_in_chroot(
+                root_mount,
+                [
+                    "/usr/sbin/grub-install",
+                    "--target=x86_64-efi",
+                    "--efi-directory=/boot/efi",
+                    "--bootloader-id=OYOPORT",
+                    "--no-nvram",
+                    "--removable",
+                ],
+            )
             self._write_portable_grub_configs(root_mount, root_uuid)
             self._ensure_portable_efi_bootloader(root_mount)
         except Exception as exc:

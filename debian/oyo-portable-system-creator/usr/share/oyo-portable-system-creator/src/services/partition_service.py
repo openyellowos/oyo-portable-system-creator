@@ -36,9 +36,8 @@ class PartitionService:
     def _clear_device_signatures(self, device: str) -> None:
         self.runner.run(["dd", "if=/dev/zero", f"of={device}", "bs=1M", "count=16", "conv=fsync"], check=True)
 
-    def make_filesystems_and_mount(self, efi_part: str, root_part: str, workdir: Path) -> tuple[Path, Path]:
+    def make_filesystems_and_mount(self, efi_part: str, root_part: str, workdir: Path) -> Path:
         root_mount = workdir / "root"
-        efi_mount = root_mount / "boot/efi"
         root_mount.mkdir(parents=True, exist_ok=True)
         try:
             self.runner.run(["mkfs.vfat", "-F", "32", "-n", "OYOPORT_EFI", efi_part])
@@ -47,11 +46,18 @@ class PartitionService:
             raise AppError("E302", f"mkfs 失敗: {exc}") from exc
         try:
             self.runner.run(["mount", root_part, str(root_mount)])
-            efi_mount.mkdir(parents=True, exist_ok=True)
-            self.runner.run(["mount", efi_part, str(efi_mount)])
         except Exception as exc:
             raise AppError("E303", f"mount 失敗: {exc}") from exc
-        return root_mount, efi_mount
+        return root_mount
+
+    def mount_efi_partition(self, efi_part: str, root_mount: Path) -> Path:
+        efi_mount = root_mount / "boot/efi"
+        efi_mount.mkdir(parents=True, exist_ok=True)
+        try:
+            self.runner.run(["mount", efi_part, str(efi_mount)])
+        except Exception as exc:
+            raise AppError("E303", f"EFI mount 失敗: {exc}") from exc
+        return efi_mount
 
     def unmount_device(self, device: str) -> None:
         escaped = device.replace("/", "\\/")

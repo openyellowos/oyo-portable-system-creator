@@ -2,9 +2,9 @@ b06407573510c4cde75812299e0b2935  usr/bin/oyo-portable-system-cli
 9c5d82da1b7765c5711c02cc75691cb1  usr/bin/oyo-portable-system-creator
 974d8d2e848ffd7da53e7ffedc290145  usr/lib/policykit-1/oyo-portable-system-creator
 4cb25176efc7c77eab739dd789c87f6a  usr/share/applications/oyo-portable-system-creator.desktop
-6b1a06dc123cc368146bc934234f4d88  usr/share/doc/oyo-portable-system-creator/changelog.Debian.gz
+22b4126327a5c361cab0998a7f59355d  usr/share/doc/oyo-portable-system-creator/changelog.gz
 6dccb7fdce9a909e0ed7fea89d43267a  usr/share/doc/oyo-portable-system-creator/copyright
-d02b47381640925b665daeae2273c801  usr/share/icons/hicolor/scalable/apps/oyo-portable-system-creator.svg
+44fe95c8835533b952aafbf519e10792  usr/share/icons/hicolor/scalable/apps/oyo-portable-system-creator.svg
 d41d8cd98f00b204e9800998ecf8427e  usr/share/oyo-portable-system-creator/src/__init__.py
 b06407573510c4cde75812299e0b2935  usr/share/oyo-portable-system-creator/src/bin/oyo-portable-system-cli
 9c5d82da1b7765c5711c02cc75691cb1  usr/share/oyo-portable-system-creator/src/bin/oyo-portable-system-creator
@@ -12,7 +12,7 @@ d41d8cd98f00b204e9800998ecf8427e  usr/share/oyo-portable-system-creator/src/core
 3681a4ab3d63fcdfec5568a2368fe78d  usr/share/oyo-portable-system-creator/src/core/controller.py
 bd5cf635bddd66fefb8bbc61baad77d6  usr/share/oyo-portable-system-creator/src/core/errors.py
 b07e3cbca54615e193bc77ad1f17dd0d  usr/share/oyo-portable-system-creator/src/core/state.py
-55558d2c83d8d111ae03ca97222cdf69  usr/share/oyo-portable-system-creator/src/core/workflow.py
+72ce1b211cc0ec304282e3d99a1102b9  usr/share/oyo-portable-system-creator/src/core/workflow.py
 d41d8cd98f00b204e9800998ecf8427e  usr/share/oyo-portable-system-creator/src/gui/__init__.py
 1b94a81ffbfeed8869eed70298675918  usr/share/oyo-portable-system-creator/src/gui/main_window.py
 58c87d267f5eea3dbec66b3e3c1e4a7b  usr/share/oyo-portable-system-creator/src/gui/wizard_pages.py
@@ -27,7 +27,7 @@ f30f7961d513bc6853e732b8f50aaef8  usr/share/oyo-portable-system-creator/src/serv
 a2e35756d72c919552b76103fe4933ad  usr/share/oyo-portable-system-creator/src/services/device_service.py
 85f5523b65dd8cbf1ac7c43026c15408  usr/share/oyo-portable-system-creator/src/services/firstboot_service.py
 a161d554352cf519ecd05e7eb3a1aa47  usr/share/oyo-portable-system-creator/src/services/optimize_service.py
-35bb026502885c2c82c422c6ad64347f  usr/share/oyo-portable-system-creator/src/services/partition_service.py
+daaae12099e6101364ef5472cc008f58  usr/share/oyo-portable-system-creator/src/services/partition_service.py
 e47111db9e6559f3edf54c52a0819e32  usr/share/oyo-portable-system-creator/src/templates/firstboot.service
 045784523c457f8425284a42d36f6247  usr/share/oyo-portable-system-creator/src/templates/fstab.portable
 8bc1d1b28f92415ef7b065f074843b79  usr/share/oyo-portable-system-creator/src/templates/grub-portable.cfg

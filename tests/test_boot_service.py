@@ -32,6 +32,10 @@ class DummyChroot:
 
     def run_in_chroot(self, root: Path, command: list[str]) -> None:
         self.calls.append((root, command))
+        if "--target=x86_64-efi" in command:
+            efi_binary = root / "boot/efi/EFI/OYOPORT/grubx64.efi"
+            efi_binary.parent.mkdir(parents=True, exist_ok=True)
+            efi_binary.write_bytes(b"generated-efi")
 
 
 class BootServiceTests(unittest.TestCase):
@@ -51,16 +55,12 @@ class BootServiceTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "E501")
 
     def test_install_grub_writes_portable_efi_layout(self) -> None:
-        source_efi_binary = self.root / "boot/efi/EFI/debian/grubx64.efi"
-        source_efi_binary.parent.mkdir(parents=True, exist_ok=True)
-        source_efi_binary.write_bytes(b"copied-efi")
-
         self.service.install_grub(self.root, "/dev/sdz", "1234-ABCD")
 
         root_cfg = (self.root / "boot/grub/grub.cfg").read_text(encoding="utf-8")
         portable_cfg = (self.root / "boot/efi/boot/grub/grub.cfg").read_text(encoding="utf-8")
         efi_chain_cfg = (self.root / "boot/efi/EFI/BOOT/grub.cfg").read_text(encoding="utf-8")
-        vendor_chain_cfg = (self.root / "boot/efi/EFI/debian/grub.cfg").read_text(encoding="utf-8")
+        vendor_chain_cfg = (self.root / "boot/efi/EFI/OYOPORT/grub.cfg").read_text(encoding="utf-8")
         removable_binary = (self.root / "boot/efi/EFI/BOOT/BOOTX64.EFI").read_bytes()
         alias_binary = (self.root / "boot/efi/EFI/BOOT/grubx64.efi").read_bytes()
         installed_binary = (self.root / "boot/efi/EFI/OYOPORT/grubx64.efi").read_bytes()
@@ -73,9 +73,9 @@ class BootServiceTests(unittest.TestCase):
         self.assertIn("search --no-floppy --set=root --file /boot/grub/grub.cfg", efi_chain_cfg)
         self.assertIn("configfile /boot/grub/grub.cfg", efi_chain_cfg)
         self.assertEqual(vendor_chain_cfg, efi_chain_cfg)
-        self.assertEqual(removable_binary, b"copied-efi")
-        self.assertEqual(alias_binary, b"copied-efi")
-        self.assertEqual(installed_binary, b"copied-efi")
+        self.assertEqual(removable_binary, b"generated-efi")
+        self.assertEqual(alias_binary, b"generated-efi")
+        self.assertEqual(installed_binary, b"generated-efi")
         self.assertEqual(
             self.chroot.calls,
             [
@@ -89,14 +89,20 @@ class BootServiceTests(unittest.TestCase):
                         "--recheck",
                         "/dev/sdz",
                     ],
+                ),
+                (
+                    self.root,
+                    [
+                        "/usr/sbin/grub-install",
+                        "--target=x86_64-efi",
+                        "--efi-directory=/boot/efi",
+                        "--bootloader-id=OYOPORT",
+                        "--no-nvram",
+                        "--removable",
+                    ],
                 )
             ],
         )
-
-    def test_install_grub_fails_without_efi_binary(self) -> None:
-        with self.assertRaises(AppError) as ctx:
-            self.service.install_grub(self.root, "/dev/sdz", "1234-ABCD")
-        self.assertEqual(ctx.exception.code, "E501")
 
 
 if __name__ == "__main__":
