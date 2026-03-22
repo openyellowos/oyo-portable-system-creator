@@ -54,16 +54,22 @@ class DummyDeviceService:
 class DummyPartitionService:
     def __init__(self, work_root: Path) -> None:
         self.work_root = work_root
+        self.calls: list[tuple[str, str]] = []
 
     def prepare_device(self, target_device: str) -> tuple[str, str]:
         return ("/dev/fake-efi", "/dev/fake-root")
 
-    def make_filesystems_and_mount(self, efi: str, root: str, workdir: Path) -> tuple[Path, Path]:
+    def make_filesystems_and_mount(self, efi: str, root: str, workdir: Path) -> Path:
+        self.calls.append(("root", efi))
         root_mount = self.work_root / "root"
-        efi_mount = self.work_root / "efi"
         root_mount.mkdir(parents=True, exist_ok=True)
+        return root_mount
+
+    def mount_efi_partition(self, efi: str, root_mount: Path) -> Path:
+        self.calls.append(("efi", efi))
+        efi_mount = self.work_root / "efi"
         efi_mount.mkdir(parents=True, exist_ok=True)
-        return (root_mount, efi_mount)
+        return efi_mount
 
 
 class DummyCopyService:
@@ -107,9 +113,10 @@ class WorkflowTests(unittest.TestCase):
         self.work_root = Path(self.tempdir.name)
         self.copy_service = DummyCopyService()
         self.logger = DummyLogger()
+        self.partition_service = DummyPartitionService(self.work_root)
         self.workflow = Workflow(
             DummyDeviceService(),
-            DummyPartitionService(self.work_root),
+            self.partition_service,
             self.copy_service,
             DummyBootService(),
             DummyOptimizeService(),
@@ -130,6 +137,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.copy_service.rsync_calls[1][0], "/")
         self.assertEqual(self.copy_service.rsync_calls[0][2], "create")
         self.assertEqual(self.copy_service.rsync_calls[1][2], "create")
+        self.assertEqual(self.partition_service.calls, [("root", "/dev/fake-efi"), ("efi", "/dev/fake-efi")])
         self.assertTrue(any("システムをコピー (1/2)" in msg for msg in self.logger.messages))
         self.assertTrue(any("システムを再同期 (2/2)" in msg for msg in self.logger.messages))
 
