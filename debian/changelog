@@ -1,4 +1,10 @@
-oyo-portable-system-creator (0.3.4) UNRELEASED; urgency=medium
+oyo-portable-system-creator (0.3.5) UNRELEASED; urgency=medium
+
+  * USBメモリのEFI起動チェーンを修正し、一部PCで起動できない不具合を修正
+
+ -- toshio <solution92001@gmail.com>  Sun, 22 Mar 2026 22:35:00 +0900
+
+oyo-portable-system-creator (0.3.4) unstable; urgency=medium
 
   * 作成したUSBメモリから起動した時に、画面がまっくろになってしまう不具合を修正
 
