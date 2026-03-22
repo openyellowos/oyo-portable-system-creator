@@ -36,6 +36,10 @@ class DummyChroot:
             efi_binary = root / "boot/efi/EFI/OYOPORT/grubx64.efi"
             efi_binary.parent.mkdir(parents=True, exist_ok=True)
             efi_binary.write_bytes(b"generated-efi")
+        if command[:2] == ["/usr/sbin/grub-mkconfig", "-o"]:
+            grub_cfg = root / "boot/grub/grub.cfg"
+            grub_cfg.parent.mkdir(parents=True, exist_ok=True)
+            grub_cfg.write_text("generated grub config\n", encoding="utf-8")
 
 
 class BootServiceTests(unittest.TestCase):
@@ -57,7 +61,6 @@ class BootServiceTests(unittest.TestCase):
     def test_install_grub_writes_portable_efi_layout(self) -> None:
         self.service.install_grub(self.root, "/dev/sdz", "1234-ABCD")
 
-        root_cfg = (self.root / "boot/grub/grub.cfg").read_text(encoding="utf-8")
         portable_cfg = (self.root / "boot/efi/boot/grub/grub.cfg").read_text(encoding="utf-8")
         efi_chain_cfg = (self.root / "boot/efi/EFI/BOOT/grub.cfg").read_text(encoding="utf-8")
         vendor_chain_cfg = (self.root / "boot/efi/EFI/OYOPORT/grub.cfg").read_text(encoding="utf-8")
@@ -65,11 +68,8 @@ class BootServiceTests(unittest.TestCase):
         alias_binary = (self.root / "boot/efi/EFI/BOOT/grubx64.efi").read_bytes()
         installed_binary = (self.root / "boot/efi/EFI/OYOPORT/grubx64.efi").read_bytes()
 
-        self.assertEqual(root_cfg, portable_cfg)
-        self.assertIn("menuentry 'open.Yellow.os Portable'", portable_cfg)
-        self.assertIn("search --no-floppy --set=root --file /vmlinuz", portable_cfg)
-        self.assertIn("linux /vmlinuz root=UUID=1234-ABCD rootwait quiet splash", portable_cfg)
-        self.assertIn("initrd /initrd.img", portable_cfg)
+        self.assertIn("search --no-floppy --set=root --file /boot/grub/grub.cfg", portable_cfg)
+        self.assertIn("configfile /boot/grub/grub.cfg", portable_cfg)
         self.assertIn("search --no-floppy --set=root --file /boot/grub/grub.cfg", efi_chain_cfg)
         self.assertIn("configfile /boot/grub/grub.cfg", efi_chain_cfg)
         self.assertEqual(vendor_chain_cfg, efi_chain_cfg)
@@ -100,6 +100,22 @@ class BootServiceTests(unittest.TestCase):
                         "--no-nvram",
                         "--removable",
                     ],
+                ),
+            ],
+        )
+
+    def test_refresh_grub_config_generates_root_grub_cfg(self) -> None:
+        self.service.refresh_grub_config(self.root)
+
+        root_cfg = (self.root / "boot/grub/grub.cfg").read_text(encoding="utf-8")
+
+        self.assertEqual(root_cfg, "generated grub config\n")
+        self.assertEqual(
+            self.chroot.calls,
+            [
+                (
+                    self.root,
+                    ["/usr/sbin/grub-mkconfig", "-o", "/boot/grub/grub.cfg"],
                 )
             ],
         )

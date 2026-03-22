@@ -41,7 +41,7 @@ class BootService:
                     "--removable",
                 ],
             )
-            self._write_portable_grub_configs(root_mount, root_uuid)
+            self._write_portable_grub_configs(root_mount)
             self._ensure_portable_efi_bootloader(root_mount)
         except Exception as exc:
             raise AppError("E501", f"grub 設定失敗: {exc}") from exc
@@ -52,18 +52,22 @@ class BootService:
         except Exception as exc:
             raise AppError("E502", f"initramfs 更新失敗: {exc}") from exc
 
-    def _write_portable_grub_configs(self, root_mount: Path, root_uuid: str) -> None:
-        root_grub_cfg = root_mount / "boot/grub/grub.cfg"
+    def refresh_grub_config(self, root_mount: Path) -> None:
+        try:
+            self.chroot.run_in_chroot(
+                root_mount,
+                ["/usr/sbin/grub-mkconfig", "-o", "/boot/grub/grub.cfg"],
+            )
+        except Exception as exc:
+            raise AppError("E503", f"grub.cfg 更新失敗: {exc}") from exc
+
+    def _write_portable_grub_configs(self, root_mount: Path) -> None:
         portable_cfg = root_mount / "boot/efi/boot/grub/grub.cfg"
         efi_chain_cfg_paths = self._efi_chain_config_paths(root_mount)
 
         try:
-            root_grub_cfg.parent.mkdir(parents=True, exist_ok=True)
-            root_grub_cfg.write_text(self._portable_efi_grub_config(root_uuid), encoding="utf-8")
-            root_grub_cfg.chmod(0o644)
-
             portable_cfg.parent.mkdir(parents=True, exist_ok=True)
-            portable_cfg.write_text(self._portable_efi_grub_config(root_uuid), encoding="utf-8")
+            portable_cfg.write_text(self._efi_chain_grub_config("/boot/grub/grub.cfg"), encoding="utf-8")
             portable_cfg.chmod(0o644)
 
             efi_chain = self._efi_chain_grub_config("/boot/grub/grub.cfg")
@@ -146,25 +150,11 @@ class BootService:
     def _efi_chain_grub_config(target_config: str) -> str:
         return (
             "set default=0\n"
-            "set timeout=0\n"
+            "set timeout=5\n"
             "insmod fat\n"
             "insmod part_gpt\n"
+            "insmod ext2\n"
             "search --no-floppy --set=root --file "
             f"{target_config}\n"
             f"configfile {target_config}\n"
-        )
-
-    @staticmethod
-    def _portable_efi_grub_config(root_uuid: str) -> str:
-        return (
-            "set default=0\n"
-            "set timeout=0\n"
-            "set menu_color_normal=black/light-gray\n"
-            "set menu_color_highlight=white/dark-gray\n"
-            "\n"
-            "menuentry 'open.Yellow.os Portable' {\n"
-            "  search --no-floppy --set=root --file /vmlinuz\n"
-            f"  linux /vmlinuz root=UUID={root_uuid} rootwait quiet splash\n"
-            "  initrd /initrd.img\n"
-            "}\n"
         )

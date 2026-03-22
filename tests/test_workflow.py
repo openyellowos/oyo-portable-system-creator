@@ -90,10 +90,19 @@ class DummyCopyService:
 
 
 class DummyBootService:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, Path]] = []
+
     def install_grub(self, root_mount: Path, target_device: str, root_uuid: str) -> None:
+        self.calls.append(("install_grub", root_mount))
         return None
 
     def update_initramfs(self, root_mount: Path) -> None:
+        self.calls.append(("update_initramfs", root_mount))
+        return None
+
+    def refresh_grub_config(self, root_mount: Path) -> None:
+        self.calls.append(("refresh_grub_config", root_mount))
         return None
 
 
@@ -114,11 +123,12 @@ class WorkflowTests(unittest.TestCase):
         self.copy_service = DummyCopyService()
         self.logger = DummyLogger()
         self.partition_service = DummyPartitionService(self.work_root)
+        self.boot_service = DummyBootService()
         self.workflow = Workflow(
             DummyDeviceService(),
             self.partition_service,
             self.copy_service,
-            DummyBootService(),
+            self.boot_service,
             DummyOptimizeService(),
             DummyFirstbootService(),
             self.logger,
@@ -138,6 +148,10 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.copy_service.rsync_calls[0][2], "create")
         self.assertEqual(self.copy_service.rsync_calls[1][2], "create")
         self.assertEqual(self.partition_service.calls, [("root", "/dev/fake-efi"), ("efi", "/dev/fake-efi")])
+        self.assertEqual(
+            [name for name, _ in self.boot_service.calls],
+            ["install_grub", "update_initramfs", "refresh_grub_config"],
+        )
         self.assertTrue(any("システムをコピー (1/2)" in msg for msg in self.logger.messages))
         self.assertTrue(any("システムを再同期 (2/2)" in msg for msg in self.logger.messages))
 

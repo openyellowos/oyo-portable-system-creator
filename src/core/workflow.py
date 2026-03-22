@@ -86,6 +86,8 @@ class Workflow:
             self.boot_service.install_grub(root_mount, state.target_device or "", root_uuid)
             self._update_progress(state, 78, "initramfs を更新")
             self.boot_service.update_initramfs(root_mount)
+            self._update_progress(state, 82, "grub.cfg を更新")
+            self.boot_service.refresh_grub_config(root_mount)
 
             self._update_progress(state, 85, "可搬向け設定を適用")
             self.optimize_service.apply(root_mount)
