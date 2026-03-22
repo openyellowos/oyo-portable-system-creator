@@ -41,7 +41,7 @@ class BootService:
                     "--removable",
                 ],
             )
-            self._write_portable_grub_configs(root_mount)
+            self._write_portable_grub_configs(root_mount, root_uuid)
             self._ensure_portable_efi_bootloader(root_mount)
         except Exception as exc:
             raise AppError("E501", f"grub 設定失敗: {exc}") from exc
@@ -61,16 +61,19 @@ class BootService:
         except Exception as exc:
             raise AppError("E503", f"grub.cfg 更新失敗: {exc}") from exc
 
-    def _write_portable_grub_configs(self, root_mount: Path) -> None:
+    def _write_portable_grub_configs(self, root_mount: Path, root_uuid: str) -> None:
         portable_cfg = root_mount / "boot/efi/boot/grub/grub.cfg"
         efi_chain_cfg_paths = self._efi_chain_config_paths(root_mount)
 
         try:
             portable_cfg.parent.mkdir(parents=True, exist_ok=True)
-            portable_cfg.write_text(self._efi_chain_grub_config("/boot/grub/grub.cfg"), encoding="utf-8")
+            portable_cfg.write_text(
+                self._efi_chain_grub_config("/boot/grub/grub.cfg", root_uuid),
+                encoding="utf-8",
+            )
             portable_cfg.chmod(0o644)
 
-            efi_chain = self._efi_chain_grub_config("/boot/grub/grub.cfg")
+            efi_chain = self._efi_chain_grub_config("/boot/grub/grub.cfg", root_uuid)
             for path in efi_chain_cfg_paths:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(efi_chain, encoding="utf-8")
@@ -121,6 +124,11 @@ class BootService:
     @staticmethod
     def _find_existing_efi_binary(root_mount: Path) -> Path | None:
         preferred = [
+            root_mount / "boot/grub/x86_64-efi/grub.efi",
+            root_mount / "boot/grub/x86_64-efi/core.efi",
+            root_mount / "usr/lib/grub/x86_64-efi/monolithic/grubx64.efi",
+            root_mount / "boot/efi/EFI/OYOPORT/grubx64.efi",
+            root_mount / "boot/efi/EFI/BOOT/grubx64.efi",
             root_mount / "boot/efi/EFI/BOOT/BOOTX64.EFI",
             root_mount / "boot/efi/EFI/BOOT/bootx64.efi",
         ]
@@ -135,10 +143,8 @@ class BootService:
         patterns = [
             "**/grubx64.efi",
             "**/GRUBX64.EFI",
-            "**/shimx64.efi",
-            "**/SHIMX64.EFI",
-            "**/*.efi",
-            "**/*.EFI",
+            "**/grub.efi",
+            "**/GRUB.EFI",
         ]
         for pattern in patterns:
             for path in sorted(efi_root.glob(pattern)):
@@ -147,14 +153,14 @@ class BootService:
         return None
 
     @staticmethod
-    def _efi_chain_grub_config(target_config: str) -> str:
+    def _efi_chain_grub_config(target_config: str, root_uuid: str) -> str:
         return (
             "set default=0\n"
             "set timeout=5\n"
             "insmod fat\n"
             "insmod part_gpt\n"
             "insmod ext2\n"
-            "search --no-floppy --set=root --file "
-            f"{target_config}\n"
+            "search --no-floppy --fs-uuid --set=root "
+            f"{root_uuid}\n"
             f"configfile {target_config}\n"
         )

@@ -33,7 +33,7 @@ class DummyChroot:
     def run_in_chroot(self, root: Path, command: list[str]) -> None:
         self.calls.append((root, command))
         if "--target=x86_64-efi" in command:
-            efi_binary = root / "boot/efi/EFI/OYOPORT/grubx64.efi"
+            efi_binary = root / "usr/lib/grub/x86_64-efi/monolithic/grubx64.efi"
             efi_binary.parent.mkdir(parents=True, exist_ok=True)
             efi_binary.write_bytes(b"generated-efi")
         if command[:2] == ["/usr/sbin/grub-mkconfig", "-o"]:
@@ -68,9 +68,9 @@ class BootServiceTests(unittest.TestCase):
         alias_binary = (self.root / "boot/efi/EFI/BOOT/grubx64.efi").read_bytes()
         installed_binary = (self.root / "boot/efi/EFI/OYOPORT/grubx64.efi").read_bytes()
 
-        self.assertIn("search --no-floppy --set=root --file /boot/grub/grub.cfg", portable_cfg)
+        self.assertIn("search --no-floppy --fs-uuid --set=root 1234-ABCD", portable_cfg)
         self.assertIn("configfile /boot/grub/grub.cfg", portable_cfg)
-        self.assertIn("search --no-floppy --set=root --file /boot/grub/grub.cfg", efi_chain_cfg)
+        self.assertIn("search --no-floppy --fs-uuid --set=root 1234-ABCD", efi_chain_cfg)
         self.assertIn("configfile /boot/grub/grub.cfg", efi_chain_cfg)
         self.assertEqual(vendor_chain_cfg, efi_chain_cfg)
         self.assertEqual(removable_binary, b"generated-efi")
