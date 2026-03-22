@@ -1,4 +1,10 @@
-oyo-portable-system-creator (0.3.0) UNRELEASED; urgency=medium
+oyo-portable-system-creator (0.3.1) UNRELEASED; urgency=medium
+
+  * アイコンが環境によって正しく表示されない問題を修正 
+
+ -- toshio <solution92001@gmail.com>  Sun, 22 Mar 2026 14:32:06 +0900
+
+oyo-portable-system-creator (0.3.0) unstable; urgency=medium
 
   * githubワークフロー  自動ビルド対応
 
