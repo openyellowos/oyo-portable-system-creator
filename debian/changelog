@@ -1,4 +1,10 @@
-oyo-portable-system-creator (0.3.5) UNRELEASED; urgency=medium
+oyo-portable-system-creator (0.3.6) UNRELEASED; urgency=medium
+
+  * アプリケーション名を修正
+
+ -- toshio <solution92001@gmail.com>  Tue, 24 Mar 2026 20:49:47 +0900
+
+oyo-portable-system-creator (0.3.5) unstable; urgency=medium
 
   * USBメモリのEFI起動チェーンを修正し、一部PCで起動できない不具合を修正
 
