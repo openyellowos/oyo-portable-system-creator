@@ -33,6 +33,8 @@ class OptimizeServiceTests(unittest.TestCase):
         self.assertIn("SystemMaxUse=64M", journald)
         self.assertIn("d /tmp 1777 root root -", tmpfiles)
         self.assertIn("d /var/tmp 1777 root root -", tmpfiles)
+        self.assertIn("d /tmp/apt-archives 0755 root root -", tmpfiles)
+        self.assertIn("d /tmp/apt-archives/partial 0700 root root -", tmpfiles)
         self.assertIn("d /var/log 0755 root root -", tmpfiles)
         self.assertIn("d /var/log/journal 0755 root root -", tmpfiles)
         self.assertIn("d /var/log/apt 0755 root root -", tmpfiles)
