@@ -1,4 +1,10 @@
-oyo-portable-system-creator (0.3.7) UNRELEASED; urgency=medium
+oyo-portable-system-creator (0.4.0) UNRELEASED; urgency=medium
+
+  * GUIの日本語/英語切り替え対応
+
+ -- toshio <solution92001@gmail.com>  Sat, 28 Mar 2026 10:28:16 +0900
+
+oyo-portable-system-creator (0.3.7) unstable; urgency=medium
 
   * aptコマンドでエラーが発生する不具合を修正 
 

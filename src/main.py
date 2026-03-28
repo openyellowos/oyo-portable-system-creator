@@ -3,9 +3,10 @@ from __future__ import annotations
 import argparse
 
 from src.core.controller import Controller
-from src.core.errors import AppError, to_exit_code
+from src.core.errors import AppError, set_error_language, to_exit_code
 from src.core.state import ExecutionState
 from src.core.workflow import Workflow
+from src.gui.i18n import detect_system_language
 from src.infra.chroot import ChrootHelper
 from src.infra.command_runner import CommandRunner
 from src.infra.logger import AppLogger
@@ -17,7 +18,9 @@ from src.services.optimize_service import OptimizeService
 from src.services.partition_service import PartitionService
 
 
-def build_controller(verbose: bool) -> Controller:
+def build_controller(verbose: bool, language: str | None = None) -> Controller:
+    resolved_language = detect_system_language() if language is None else language
+    set_error_language(resolved_language)
     logger = AppLogger()
     logger.configure(verbose=verbose)
     runner = CommandRunner(logger)
@@ -28,7 +31,7 @@ def build_controller(verbose: bool) -> Controller:
     boot = BootService(runner, chroot)
     optimize = OptimizeService()
     firstboot = FirstbootService()
-    workflow = Workflow(device, partition, copy, boot, optimize, firstboot, logger)
+    workflow = Workflow(device, partition, copy, boot, optimize, firstboot, logger, language=resolved_language)
     return Controller(workflow)
 
 

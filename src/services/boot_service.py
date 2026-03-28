@@ -15,9 +15,9 @@ class BootService:
     def install_grub(self, root_mount: Path, target_device: str, root_uuid: str) -> None:
         try:
             if not target_device:
-                raise AppError("E501", "grub インストール先デバイスが空です")
+                raise AppError.translated("E501", "error.empty_grub_target_device")
             if not root_uuid or root_uuid == "UNKNOWN":
-                raise AppError("E501", "root UUID を取得できませんでした")
+                raise AppError.translated("E501", "error.root_uuid_unavailable")
 
             self.chroot.run_in_chroot(
                 root_mount,
@@ -43,14 +43,18 @@ class BootService:
             )
             self._write_portable_grub_configs(root_mount, root_uuid)
             self._ensure_portable_efi_bootloader(root_mount)
+        except AppError:
+            raise
         except Exception as exc:
-            raise AppError("E501", f"grub 設定失敗: {exc}") from exc
+            raise AppError.translated("E501", "error.grub_config_failed", reason=str(exc)) from exc
 
     def update_initramfs(self, root_mount: Path) -> None:
         try:
             self.chroot.run_in_chroot(root_mount, ["/usr/sbin/update-initramfs", "-u"])
+        except AppError:
+            raise
         except Exception as exc:
-            raise AppError("E502", f"initramfs 更新失敗: {exc}") from exc
+            raise AppError.translated("E502", "error.initramfs_update_failed", reason=str(exc)) from exc
 
     def refresh_grub_config(self, root_mount: Path) -> None:
         try:
@@ -58,8 +62,10 @@ class BootService:
                 root_mount,
                 ["/usr/sbin/grub-mkconfig", "-o", "/boot/grub/grub.cfg"],
             )
+        except AppError:
+            raise
         except Exception as exc:
-            raise AppError("E503", f"grub.cfg 更新失敗: {exc}") from exc
+            raise AppError.translated("E503", "error.grub_cfg_update_failed", reason=str(exc)) from exc
 
     def _write_portable_grub_configs(self, root_mount: Path, root_uuid: str) -> None:
         portable_cfg = root_mount / "boot/efi/boot/grub/grub.cfg"
@@ -79,7 +85,7 @@ class BootService:
                 path.write_text(efi_chain, encoding="utf-8")
                 path.chmod(0o644)
         except OSError as exc:
-            raise AppError("E501", f"grub 設定ファイル生成失敗: {exc}") from exc
+            raise AppError.translated("E501", "error.grub_config_write_failed", reason=str(exc)) from exc
 
     @staticmethod
     def _efi_chain_config_paths(root_mount: Path) -> list[Path]:
@@ -105,7 +111,7 @@ class BootService:
     def _ensure_portable_efi_bootloader(self, root_mount: Path) -> None:
         source = self._find_existing_efi_binary(root_mount)
         if source is None:
-            raise AppError("E501", "利用可能な EFI 起動バイナリが見つかりません")
+            raise AppError.translated("E501", "error.efi_binary_not_found")
 
         targets = [
             root_mount / "boot/efi/EFI/BOOT/BOOTX64.EFI",
@@ -119,7 +125,7 @@ class BootService:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(payload)
         except OSError as exc:
-            raise AppError("E501", f"EFI grub バイナリ配置失敗: {exc}") from exc
+            raise AppError.translated("E501", "error.efi_binary_copy_failed", reason=str(exc)) from exc
 
     @staticmethod
     def _find_existing_efi_binary(root_mount: Path) -> Path | None:

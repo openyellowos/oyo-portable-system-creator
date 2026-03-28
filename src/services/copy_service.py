@@ -76,29 +76,29 @@ class CopyService:
             return "/"
         if mode == "backup" and source_device:
             return self._validate_backup_source(source_device)
-        raise AppError("E201", "コピー元が不正です")
+        raise AppError.translated("E201", "error.invalid_source")
 
     def _validate_create_source(self, source_path: str) -> str:
         path = Path(source_path)
         if not path.exists() or not path.is_dir():
-            raise AppError("E201", "create 元は存在するディレクトリを指定してください")
+            raise AppError.translated("E201", "error.invalid_create_source")
         return str(path.resolve())
 
     def _validate_backup_source(self, source_path: str) -> str:
         path = Path(source_path)
         if not path.exists() or not path.is_dir():
-            raise AppError("E201", "backup 元はマウント済みのディレクトリを指定してください")
+            raise AppError.translated("E201", "error.invalid_backup_source")
 
         fstype = self.runner.run(["findmnt", "-n", "-o", "FSTYPE", "-T", str(path)], check=False).stdout.strip()
         if fstype and fstype != "ext4":
-            raise AppError("E201", f"backup 元 filesystem が非対応です: {fstype}")
+            raise AppError.translated("E201", "error.unsupported_backup_filesystem", fstype=fstype)
 
         marker_files = [
             path / "etc/fstab",
             path / "etc/systemd/system/oyo-firstboot.service",
         ]
         if not all(m.exists() for m in marker_files):
-            raise AppError("E201", "backup 元が portable USB root と判定できません")
+            raise AppError.translated("E201", "error.backup_source_not_portable")
         return str(path.resolve())
 
     def estimate_copy_bytes(self, source: str, mode: str) -> int:
@@ -106,14 +106,14 @@ class CopyService:
             command = self._build_rsync_command(source, tmpdir, mode=mode, dry_run=True)
             result = self.runner.run(command, check=False)
         if result.returncode != 0:
-            raise AppError("E401", "rsync dry-run に失敗しました")
+            raise AppError.translated("E401", "error.rsync_dry_run_failed")
         return self._parse_total_transferred_file_size(result.stdout, result.stderr)
 
     def rsync_copy(self, source: str, target_root: Path, mode: str) -> None:
         command = self._build_rsync_command(source, str(target_root), mode=mode)
         result = self.runner.run(command, check=False)
         if result.returncode != 0:
-            raise AppError("E401", "rsync に失敗しました")
+            raise AppError.translated("E401", "error.rsync_failed")
 
     def _build_rsync_command(self, source: str, target: str, *, mode: str, dry_run: bool = False) -> list[str]:
         command = ["rsync", "-aHAX", "--delete"]
@@ -170,7 +170,7 @@ class CopyService:
         output = "\n".join(part for part in (stdout, stderr) if part)
         match = re.search(r"total transferred file size:\s*([0-9,]+)\s+bytes", output, flags=re.IGNORECASE)
         if not match:
-            raise AppError("E401", "rsync dry-run の統計を解析できませんでした")
+            raise AppError.translated("E401", "error.rsync_stats_parse_failed")
         return int(match.group(1).replace(",", ""))
 
     def write_fstab(self, target_root: Path, root_uuid: str, efi_uuid: str) -> None:
@@ -182,4 +182,4 @@ class CopyService:
             body = body.replace("{{ROOT_UUID}}", root_uuid).replace("{{EFI_UUID}}", efi_uuid)
             fstab.write_text(body, encoding="utf-8")
         except OSError as exc:
-            raise AppError("E402", f"fstab 生成失敗: {exc}") from exc
+            raise AppError.translated("E402", "error.fstab_generate_failed", reason=str(exc)) from exc

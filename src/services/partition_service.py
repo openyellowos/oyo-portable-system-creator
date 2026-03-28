@@ -25,8 +25,10 @@ class PartitionService:
             self.runner.run(["parted", "-s", device, "mkpart", "root", "ext4", "515MiB", "100%"])
             self.runner.run(["partprobe", device], check=False)
             time.sleep(1)
+        except AppError:
+            raise
         except Exception as exc:
-            raise AppError("E301", f"パーティション作成失敗: {exc}") from exc
+            raise AppError.translated("E301", "error.partition_prepare_failed", reason=str(exc)) from exc
 
         suffix = "p" if device.startswith("/dev/nvme") or device.startswith("/dev/mmcblk") else ""
         efi = f"{device}{suffix}2"
@@ -42,12 +44,16 @@ class PartitionService:
         try:
             self.runner.run(["mkfs.vfat", "-F", "32", "-n", "OYOPORT_EFI", efi_part])
             self.runner.run(["mkfs.ext4", "-F", "-L", "OYOPORT_ROOT", root_part])
+        except AppError:
+            raise
         except Exception as exc:
-            raise AppError("E302", f"mkfs 失敗: {exc}") from exc
+            raise AppError.translated("E302", "error.mkfs_failed", reason=str(exc)) from exc
         try:
             self.runner.run(["mount", root_part, str(root_mount)])
+        except AppError:
+            raise
         except Exception as exc:
-            raise AppError("E303", f"mount 失敗: {exc}") from exc
+            raise AppError.translated("E303", "error.mount_failed", reason=str(exc)) from exc
         return root_mount
 
     def mount_efi_partition(self, efi_part: str, root_mount: Path) -> Path:
@@ -55,8 +61,10 @@ class PartitionService:
         efi_mount.mkdir(parents=True, exist_ok=True)
         try:
             self.runner.run(["mount", efi_part, str(efi_mount)])
+        except AppError:
+            raise
         except Exception as exc:
-            raise AppError("E303", f"EFI mount 失敗: {exc}") from exc
+            raise AppError.translated("E303", "error.efi_mount_failed", reason=str(exc)) from exc
         return efi_mount
 
     def unmount_device(self, device: str) -> None:

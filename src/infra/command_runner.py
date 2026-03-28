@@ -44,7 +44,7 @@ class CommandRunner:
         if sanitized_stderr:
             self.logger.debug(sanitized_stderr)
         if check and result.returncode != 0:
-            raise AppError("E999", f"Command failed: {' '.join(masked)}")
+            raise AppError.translated("E999", "error.command_failed", command=" ".join(masked))
         return result
 
     @staticmethod
