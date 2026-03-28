@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 from PyQt6.QtCore import QLocale
@@ -18,6 +19,10 @@ def normalize_language(language: str | None) -> str:
 
 
 def detect_system_language() -> str:
+    for key in ("LC_ALL", "LC_MESSAGES", "LANGUAGE", "LANG"):
+        value = os.environ.get(key)
+        if value:
+            return normalize_language(value)
     return normalize_language(QLocale.system().name())
 
 
