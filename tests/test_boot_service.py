@@ -97,12 +97,32 @@ class BootServiceTests(unittest.TestCase):
                         "--target=x86_64-efi",
                         "--efi-directory=/boot/efi",
                         "--bootloader-id=OYOPORT",
+                        "--modules=part_gpt fat ext2",
                         "--no-nvram",
                         "--removable",
                     ],
                 ),
             ],
         )
+
+    def test_install_grub_enables_cryptodisk_when_root_is_encrypted(self) -> None:
+        self.service.install_grub(
+            self.root,
+            "/dev/sdz",
+            "1234-ABCD",
+            encryption_enabled=True,
+            luks_uuid="LUKS-UUID",
+        )
+
+        default_grub = (self.root / "etc/default/grub").read_text(encoding="utf-8")
+        portable_cfg = (self.root / "boot/efi/boot/grub/grub.cfg").read_text(encoding="utf-8")
+
+        self.assertIn("GRUB_ENABLE_CRYPTODISK=y", default_grub)
+        self.assertIn("cryptomount -u LUKS-UUID", portable_cfg)
+        self.assertIn("set root=(crypto0)", portable_cfg)
+        self.assertIn("set prefix=($root)/boot/grub", portable_cfg)
+        self.assertIn("--modules=part_gpt fat ext2 luks luks2 cryptodisk gcry_rijndael gcry_sha256", self.chroot.calls[0][1])
+        self.assertIn("insmod luks2", portable_cfg)
 
     def test_refresh_grub_config_generates_root_grub_cfg(self) -> None:
         self.service.refresh_grub_config(self.root)
@@ -119,6 +139,30 @@ class BootServiceTests(unittest.TestCase):
                 )
             ],
         )
+
+    def test_find_existing_efi_binary_prefers_grub_binary_over_bootx64_shim(self) -> None:
+        bootx64 = self.root / "boot/efi/EFI/BOOT/BOOTX64.EFI"
+        installed = self.root / "boot/efi/EFI/OYOPORT/grubx64.efi"
+        bootx64.parent.mkdir(parents=True, exist_ok=True)
+        installed.parent.mkdir(parents=True, exist_ok=True)
+        bootx64.write_bytes(b"shim")
+        installed.write_bytes(b"grub")
+
+        found = self.service._find_existing_efi_binary(self.root)
+
+        self.assertEqual(found, installed)
+
+    def test_find_existing_efi_binary_prefers_installed_bootloader_over_monolithic_fallback(self) -> None:
+        monolithic = self.root / "usr/lib/grub/x86_64-efi/monolithic/grubx64.efi"
+        installed = self.root / "boot/efi/EFI/OYOPORT/grubx64.efi"
+        monolithic.parent.mkdir(parents=True, exist_ok=True)
+        installed.parent.mkdir(parents=True, exist_ok=True)
+        monolithic.write_bytes(b"monolithic")
+        installed.write_bytes(b"installed")
+
+        found = self.service._find_existing_efi_binary(self.root)
+
+        self.assertEqual(found, installed)
 
 
 if __name__ == "__main__":

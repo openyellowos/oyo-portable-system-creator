@@ -173,13 +173,31 @@ class CopyService:
             raise AppError.translated("E401", "error.rsync_stats_parse_failed")
         return int(match.group(1).replace(",", ""))
 
-    def write_fstab(self, target_root: Path, root_uuid: str, efi_uuid: str) -> None:
+    def write_fstab(
+        self,
+        target_root: Path,
+        root_uuid: str,
+        efi_uuid: str,
+        *,
+        encryption_enabled: bool = False,
+        mapper_name: str = "oyoport-cryptroot",
+        luks_uuid: str | None = None,
+    ) -> None:
         fstab = target_root / "etc/fstab"
         fstab.parent.mkdir(parents=True, exist_ok=True)
         template = Path(__file__).resolve().parent.parent / "templates/fstab.portable"
         try:
             body = template.read_text(encoding="utf-8")
-            body = body.replace("{{ROOT_UUID}}", root_uuid).replace("{{EFI_UUID}}", efi_uuid)
+            root_spec = f"/dev/mapper/{mapper_name}" if encryption_enabled else f"UUID={root_uuid}"
+            body = body.replace("{{ROOT_SPEC}}", root_spec).replace("{{EFI_UUID}}", efi_uuid)
             fstab.write_text(body, encoding="utf-8")
+            crypttab = target_root / "etc/crypttab"
+            if encryption_enabled and luks_uuid:
+                crypttab.write_text(
+                    f"{mapper_name} UUID={luks_uuid} none luks,discard\n",
+                    encoding="utf-8",
+                )
+            elif crypttab.exists():
+                crypttab.unlink()
         except OSError as exc:
             raise AppError.translated("E402", "error.fstab_generate_failed", reason=str(exc)) from exc

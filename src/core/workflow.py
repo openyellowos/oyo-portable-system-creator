@@ -40,7 +40,8 @@ class Workflow:
     def precheck(self, state: ExecutionState) -> None:
         self.device_service.check_os()
         self.device_service.check_root()
-        self.device_service.check_required_commands()
+        encryption_enabled = bool(state.options.get("encryption_enabled"))
+        self.device_service.check_required_commands(encryption_enabled=encryption_enabled)
         if not state.target_device:
             raise AppError.translated("E201", "error.target_required")
         self.device_service.validate_target_device(state.target_device)
@@ -68,8 +69,21 @@ class Workflow:
             self._update_progress(state, 20, self.translate("workflow.partition.create"))
             efi, root = self.partition_service.prepare_device(state.target_device or "")
             self._update_progress(state, 30, self.translate("workflow.fs.mount"))
-            root_mount = self.partition_service.make_filesystems_and_mount(efi, root, workdir)
+            encryption_enabled = bool(state.options.get("encryption_enabled"))
+            mapper_name = str(state.options.get("luks_mapper_name") or "oyoport-cryptroot")
+            root_mount, root_device = self.partition_service.make_filesystems_and_mount(
+                efi,
+                root,
+                workdir,
+                encryption_enabled=encryption_enabled,
+                luks_passphrase=state.options.get("luks_passphrase"),
+                mapper_name=mapper_name,
+            )
             state.mounted_paths.append(str(root_mount))
+            state.metadata["root_device"] = root_device
+            if encryption_enabled:
+                state.metadata["luks_uuid"] = self._blkid(root)
+                state.metadata["luks_mapper_name"] = mapper_name
 
             self._update_progress(state, 45, self.translate("workflow.copy.first"))
             source_path = str(state.metadata.get("source_path") or self.copy_service.resolve_source(mode, state.source_device))
@@ -81,12 +95,25 @@ class Workflow:
             state.mounted_paths.append(str(efi_mount))
 
             self._update_progress(state, 60, self.translate("workflow.fstab"))
-            root_uuid = self._blkid(root)
+            root_uuid = self._blkid(str(state.metadata.get("root_device") or root))
             efi_uuid = self._blkid(efi)
-            self.copy_service.write_fstab(root_mount, root_uuid, efi_uuid)
+            self.copy_service.write_fstab(
+                root_mount,
+                root_uuid,
+                efi_uuid,
+                encryption_enabled=encryption_enabled,
+                mapper_name=mapper_name,
+                luks_uuid=state.metadata.get("luks_uuid"),
+            )
 
             self._update_progress(state, 70, self.translate("workflow.grub.install"))
-            self.boot_service.install_grub(root_mount, state.target_device or "", root_uuid)
+            self.boot_service.install_grub(
+                root_mount,
+                state.target_device or "",
+                root_uuid,
+                encryption_enabled=encryption_enabled,
+                luks_uuid=state.metadata.get("luks_uuid"),
+            )
             self._update_progress(state, 78, self.translate("workflow.initramfs"))
             self.boot_service.update_initramfs(root_mount)
             self._update_progress(state, 82, self.translate("workflow.grub.config"))
@@ -115,4 +142,6 @@ class Workflow:
         mounts = state.mounted_paths[:]
         for p in reversed(mounts):
             self.device_service.runner.run(["umount", "-lf", p], check=False)
+        mapper_name = state.metadata.get("luks_mapper_name")
+        self.partition_service.close_encrypted_root(str(mapper_name) if mapper_name else None)
         state.mounted_paths.clear()

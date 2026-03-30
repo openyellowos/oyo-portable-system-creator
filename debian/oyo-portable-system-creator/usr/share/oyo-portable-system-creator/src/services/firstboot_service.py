@@ -33,5 +33,7 @@ class FirstbootService:
             link = wants / "oyo-firstboot.service"
             if not link.exists():
                 link.symlink_to("/etc/systemd/system/oyo-firstboot.service")
+        except AppError:
+            raise
         except Exception as exc:
-            raise AppError("E601", f"firstboot 準備失敗: {exc}") from exc
+            raise AppError.translated("E601", "error.firstboot_prepare_failed", reason=str(exc)) from exc

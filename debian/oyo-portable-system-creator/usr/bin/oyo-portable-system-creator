@@ -21,6 +21,10 @@ if [[ "$(id -u)" -ne 0 ]]; then
   exec pkexec env \
     DISPLAY="${DISPLAY:-}" \
     XAUTHORITY="${XAUTHORITY:-${HOME}/.Xauthority}" \
+    LANG="${LANG:-}" \
+    LANGUAGE="${LANGUAGE:-}" \
+    LC_ALL="${LC_ALL:-}" \
+    LC_MESSAGES="${LC_MESSAGES:-}" \
     PYTHONPATH="${app_root}${PYTHONPATH:+:${PYTHONPATH}}" \
     python3 -c 'from src.gui.main_window import run_gui; raise SystemExit(run_gui())'
 fi

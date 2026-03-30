@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import logging
+import string
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
+    QCheckBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QProgressBar,
@@ -69,13 +72,14 @@ class DiagnosticWorker(QObject):
     failed = pyqtSignal(str)
     log = pyqtSignal(str)
 
-    def __init__(self, target_device: str, language: str) -> None:
+    def __init__(self, target_device: str, language: str, options: dict | None = None) -> None:
         super().__init__()
         self.target_device = target_device
         self.language = language
+        self.options = options or {}
 
     def run(self) -> None:
-        state = ExecutionState(mode="create", target_device=self.target_device)
+        state = ExecutionState(mode="create", target_device=self.target_device, options=dict(self.options))
         try:
             controller, _ = build_services(verbose=False, log_signal=self.log, language=self.language)
             result = controller.precheck(state)
@@ -90,16 +94,17 @@ class CreateWorker(QObject):
     progress = pyqtSignal(int, str)
     log = pyqtSignal(str)
 
-    def __init__(self, target_device: str, language: str) -> None:
+    def __init__(self, target_device: str, language: str, options: dict | None = None) -> None:
         super().__init__()
         self.target_device = target_device
         self.language = language
+        self.options = options or {}
 
     def run(self) -> None:
         state = ExecutionState(
             mode="create",
             target_device=self.target_device,
-            options={"yes": True, "force": False, "verbose": False},
+            options={"yes": True, "force": False, "verbose": False, **self.options},
         )
         try:
             controller, _ = build_services(verbose=False, log_signal=self.log, language=self.language)
@@ -187,6 +192,17 @@ class MainWindow(QMainWindow):
         self.create_button = QPushButton(self.t("button.create"))
         self.create_button.clicked.connect(self.run_create)
 
+        self.encryption_checkbox = QCheckBox(self.t("security.enable_encryption"))
+        self.encryption_checkbox.toggled.connect(self._on_encryption_toggled)
+        self.luks_password_label = QLabel(self.t("security.luks_password"))
+        self.luks_password_confirm_label = QLabel(self.t("security.confirm_password"))
+        self.luks_password_input = QLineEdit()
+        self.luks_password_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.luks_password_confirm_input = QLineEdit()
+        self.luks_password_confirm_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.show_password_checkbox = QCheckBox(self.t("security.show_password"))
+        self.show_password_checkbox.toggled.connect(self._on_show_password_toggled)
+
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setPlaceholderText(self.t("log.placeholder"))
@@ -222,6 +238,22 @@ class MainWindow(QMainWindow):
         device_layout.addWidget(self.reload_button, 0, 2)
         device_layout.setColumnStretch(1, 1)
         outer.addWidget(device_frame)
+
+        security_frame = QFrame()
+        security_frame.setObjectName("Panel")
+        security_layout = QGridLayout(security_frame)
+        security_layout.setContentsMargins(12, 12, 12, 12)
+        security_layout.setHorizontalSpacing(8)
+        security_layout.setVerticalSpacing(8)
+        security_layout.addWidget(QLabel(self.t("security.title")), 0, 0, 1, 2)
+        security_layout.addWidget(self.encryption_checkbox, 1, 0, 1, 2)
+        security_layout.addWidget(self.luks_password_label, 2, 0)
+        security_layout.addWidget(self.luks_password_input, 2, 1)
+        security_layout.addWidget(self.luks_password_confirm_label, 3, 0)
+        security_layout.addWidget(self.luks_password_confirm_input, 3, 1)
+        security_layout.addWidget(self.show_password_checkbox, 4, 1)
+        security_layout.setColumnStretch(1, 1)
+        outer.addWidget(security_frame)
 
         action_row = QHBoxLayout()
         action_row.setSpacing(12)
@@ -271,7 +303,7 @@ class MainWindow(QMainWindow):
                 border: 1px solid #d7d1ca;
                 border-radius: 10px;
             }
-            QComboBox, QTextEdit {
+            QComboBox, QTextEdit, QLineEdit {
                 background: #fbfaf8;
                 border: 1px solid #cfc8c0;
                 border-radius: 8px;
@@ -319,6 +351,7 @@ class MainWindow(QMainWindow):
             }
             """
         )
+        self._on_encryption_toggled(False)
 
     def _update_action_state(self) -> None:
         has_target = self._selected_device() is not None
@@ -408,6 +441,50 @@ class MainWindow(QMainWindow):
     def _on_device_changed(self, _index: int) -> None:
         self._invalidate_diagnostic()
 
+    def _on_encryption_toggled(self, checked: bool) -> None:
+        self.luks_password_label.setVisible(checked)
+        self.luks_password_input.setVisible(checked)
+        self.luks_password_confirm_label.setVisible(checked)
+        self.luks_password_confirm_input.setVisible(checked)
+        self.show_password_checkbox.setVisible(checked)
+        self._invalidate_diagnostic()
+
+    def _on_show_password_toggled(self, checked: bool) -> None:
+        echo_mode = QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
+        self.luks_password_input.setEchoMode(echo_mode)
+        self.luks_password_confirm_input.setEchoMode(echo_mode)
+
+    @staticmethod
+    def _validate_luks_password(password: str) -> None:
+        if password != password.strip():
+            raise ValueError("surrounding_whitespace")
+        if any(ch not in string.printable or ch in "\r\n\t\x0b\x0c" for ch in password):
+            raise ValueError("non_ascii")
+
+    def _build_create_options(self) -> dict:
+        if not self.encryption_checkbox.isChecked():
+            return {"encryption_enabled": False}
+
+        password = self.luks_password_input.text()
+        confirm = self.luks_password_confirm_input.text()
+        if not password:
+            raise ValueError(self.t("error.luks_password_required"))
+        try:
+            self._validate_luks_password(password)
+        except ValueError as exc:
+            if str(exc) == "surrounding_whitespace":
+                raise ValueError(self.t("error.luks_password_whitespace")) from exc
+            if str(exc) == "non_ascii":
+                raise ValueError(self.t("error.luks_password_ascii_only")) from exc
+            raise
+        if password != confirm:
+            raise ValueError(self.t("error.luks_password_mismatch"))
+        return {
+            "encryption_enabled": True,
+            "luks_passphrase": password,
+            "luks_mapper_name": "oyoport-cryptroot",
+        }
+
     def reload_devices(self) -> None:
         self._invalidate_diagnostic()
         self._set_status(self.t("status.loading_devices"))
@@ -417,15 +494,25 @@ class MainWindow(QMainWindow):
         target = self._selected_device()
         if target is None:
             return
+        try:
+            options = self._build_create_options()
+        except ValueError as exc:
+            QMessageBox.critical(self, self.t("dialog.error.title"), str(exc))
+            return
         self.log_view.clear()
         self._invalidate_diagnostic()
         self._append_log(self.t("log.start_diagnostic", target=target))
         self._set_status(self.t("status.running_diagnostic"))
-        self._start_worker(DiagnosticWorker(target, self.language), self._on_diagnostic_finished)
+        self._start_worker(DiagnosticWorker(target, self.language, options), self._on_diagnostic_finished)
 
     def run_create(self) -> None:
         target = self._selected_device()
         if target is None:
+            return
+        try:
+            options = self._build_create_options()
+        except ValueError as exc:
+            QMessageBox.critical(self, self.t("dialog.error.title"), str(exc))
             return
         if not self.doctor_ok or self.last_doctor_device != target:
             QMessageBox.warning(
@@ -456,7 +543,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setFormat("%p%")
         self._append_log(self.t("log.start_create", target=target))
         self._set_status(self.t("status.running_create"))
-        self._start_worker(CreateWorker(target, self.language), self._on_create_finished)
+        self._start_worker(CreateWorker(target, self.language, options), self._on_create_finished)
 
     def _start_worker(self, worker: QObject, finished_handler) -> None:
         if self.worker_thread is not None and self.worker_thread.isRunning():

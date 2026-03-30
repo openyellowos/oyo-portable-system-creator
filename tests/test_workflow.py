@@ -38,7 +38,7 @@ class DummyDeviceService:
     def check_root(self) -> None:
         return None
 
-    def check_required_commands(self) -> None:
+    def check_required_commands(self, *, encryption_enabled: bool = False) -> None:
         return None
 
     def validate_target_device(self, target_device: str) -> None:
@@ -59,17 +59,20 @@ class DummyPartitionService:
     def prepare_device(self, target_device: str) -> tuple[str, str]:
         return ("/dev/fake-efi", "/dev/fake-root")
 
-    def make_filesystems_and_mount(self, efi: str, root: str, workdir: Path) -> Path:
+    def make_filesystems_and_mount(self, efi: str, root: str, workdir: Path, **_: object) -> Path:
         self.calls.append(("root", efi))
         root_mount = self.work_root / "root"
         root_mount.mkdir(parents=True, exist_ok=True)
-        return root_mount
+        return root_mount, "/dev/fake-root"
 
     def mount_efi_partition(self, efi: str, root_mount: Path) -> Path:
         self.calls.append(("efi", efi))
         efi_mount = self.work_root / "efi"
         efi_mount.mkdir(parents=True, exist_ok=True)
         return efi_mount
+
+    def close_encrypted_root(self, mapper_name: str | None) -> None:
+        return None
 
 
 class DummyCopyService:
@@ -85,7 +88,7 @@ class DummyCopyService:
     def rsync_copy(self, source: str, target_root: Path, mode: str) -> None:
         self.rsync_calls.append((source, target_root, mode))
 
-    def write_fstab(self, target_root: Path, root_uuid: str, efi_uuid: str) -> None:
+    def write_fstab(self, target_root: Path, root_uuid: str, efi_uuid: str, **_: object) -> None:
         return None
 
 
@@ -93,7 +96,7 @@ class DummyBootService:
     def __init__(self) -> None:
         self.calls: list[tuple[str, Path]] = []
 
-    def install_grub(self, root_mount: Path, target_device: str, root_uuid: str) -> None:
+    def install_grub(self, root_mount: Path, target_device: str, root_uuid: str, **_: object) -> None:
         self.calls.append(("install_grub", root_mount))
         return None
 

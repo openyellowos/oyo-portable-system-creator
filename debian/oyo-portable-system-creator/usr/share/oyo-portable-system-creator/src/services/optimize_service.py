@@ -30,6 +30,8 @@ class OptimizeService:
         base = template.read_text(encoding="utf-8")
         (tmpfiles_dir / "oyo-portable.conf").write_text(
             base
+            + "d /tmp/apt-archives 0755 root root -\n"
+            + "d /tmp/apt-archives/partial 0700 root root -\n"
             + "d /var/log 0755 root root -\n"
             + "d /var/log/journal 0755 root root -\n"
             + "d /var/log/apt 0755 root root -\n"

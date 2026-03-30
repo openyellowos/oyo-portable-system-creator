@@ -25,6 +25,10 @@ REQUIRED_COMMANDS = [
     "update-initramfs",
 ]
 
+ENCRYPTION_REQUIRED_COMMANDS = [
+    "cryptsetup",
+]
+
 
 class DeviceService:
     def __init__(self, runner: CommandRunner, logger: AppLogger) -> None:
@@ -38,8 +42,11 @@ class DeviceService:
         if os.geteuid() != 0:
             raise AppError.translated("E121", "error.root_required")
 
-    def check_required_commands(self) -> None:
-        missing = [c for c in REQUIRED_COMMANDS if shutil.which(c) is None]
+    def check_required_commands(self, *, encryption_enabled: bool = False) -> None:
+        required_commands = REQUIRED_COMMANDS[:]
+        if encryption_enabled:
+            required_commands.extend(ENCRYPTION_REQUIRED_COMMANDS)
+        missing = [c for c in required_commands if shutil.which(c) is None]
         if missing:
             raise AppError.translated("E122", "error.required_commands_missing", commands=", ".join(missing))
 

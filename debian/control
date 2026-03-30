@@ -7,5 +7,5 @@ Build-Depends: debhelper-compat (= 13), dh-python, python3
 
 Package: oyo-portable-system-creator
 Architecture: all
-Depends: ${misc:Depends}, ${python3:Depends}, python3-pyqt6, rsync, grub-pc-bin, grub-efi-amd64-bin
+Depends: ${misc:Depends}, ${python3:Depends}, python3-pyqt6, rsync, grub-pc-bin, grub-efi-amd64-bin, cryptsetup, cryptsetup-initramfs
 Description: Portable system creator for open.Yellow.os

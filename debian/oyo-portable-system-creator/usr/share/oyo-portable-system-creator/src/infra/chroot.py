@@ -27,7 +27,7 @@ class ChrootHelper:
                 if result.returncode != 0:
                     failed = True
             if run_error is None and failed:
-                raise AppError("E699", "bind mount cleanup 失敗", fatal=False)
+                raise AppError.translated("E699", "error.bind_cleanup_failed", fatal=False)
 
         if run_error is not None:
-            raise AppError("E999", f"chroot 実行失敗: {run_error}") from run_error
+            raise AppError.translated("E999", "error.chroot_run_failed", reason=str(run_error)) from run_error

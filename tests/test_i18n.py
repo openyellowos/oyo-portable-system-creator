@@ -21,6 +21,7 @@ class I18nTests(unittest.TestCase):
     def test_translator_returns_english_message(self) -> None:
         translator = build_translator("en_US")
         self.assertEqual(translator("button.reload"), "Reload")
+        self.assertEqual(translator("security.show_password"), "Show password")
 
     def test_app_error_uses_current_language(self) -> None:
         set_error_language("en")

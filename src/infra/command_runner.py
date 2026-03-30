@@ -27,10 +27,11 @@ class CommandRunner:
         check: bool = True,
         mask_values: list[str] | None = None,
         cwd: str | None = None,
+        input_text: str | None = None,
     ) -> CommandResult:
         masked = self._masked(command, mask_values or [])
         self.logger.debug(f"$ {' '.join(masked)}")
-        completed = subprocess.run(command, capture_output=True, text=True, cwd=cwd)
+        completed = subprocess.run(command, capture_output=True, text=True, cwd=cwd, input=input_text)
         result = CommandResult(
             command=command,
             returncode=completed.returncode,

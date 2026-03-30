@@ -38,23 +38,57 @@ class PartitionService:
     def _clear_device_signatures(self, device: str) -> None:
         self.runner.run(["dd", "if=/dev/zero", f"of={device}", "bs=1M", "count=16", "conv=fsync"], check=True)
 
-    def make_filesystems_and_mount(self, efi_part: str, root_part: str, workdir: Path) -> Path:
+    def make_filesystems_and_mount(
+        self,
+        efi_part: str,
+        root_part: str,
+        workdir: Path,
+        *,
+        encryption_enabled: bool = False,
+        luks_passphrase: str | None = None,
+        mapper_name: str = "oyoport-cryptroot",
+    ) -> tuple[Path, str]:
         root_mount = workdir / "root"
         root_mount.mkdir(parents=True, exist_ok=True)
+        root_device = root_part
         try:
             self.runner.run(["mkfs.vfat", "-F", "32", "-n", "OYOPORT_EFI", efi_part])
-            self.runner.run(["mkfs.ext4", "-F", "-L", "OYOPORT_ROOT", root_part])
+            if encryption_enabled:
+                passphrase = luks_passphrase or ""
+                self.runner.run(
+                    [
+                        "cryptsetup",
+                        "luksFormat",
+                        "--batch-mode",
+                        "--type",
+                        "luks2",
+                        "--pbkdf",
+                        "pbkdf2",
+                        "--key-file",
+                        "-",
+                        root_part,
+                    ],
+                    input_text=passphrase,
+                    mask_values=[passphrase],
+                )
+                self.runner.run(
+                    ["cryptsetup", "open", "--key-file", "-", root_part, mapper_name],
+                    input_text=passphrase,
+                    mask_values=[passphrase],
+                )
+                root_device = f"/dev/mapper/{mapper_name}"
+            self.runner.run(["mkfs.ext4", "-F", "-L", "OYOPORT_ROOT", root_device])
         except AppError:
             raise
         except Exception as exc:
             raise AppError.translated("E302", "error.mkfs_failed", reason=str(exc)) from exc
         try:
-            self.runner.run(["mount", root_part, str(root_mount)])
+            self.runner.run(["mount", root_device, str(root_mount)])
         except AppError:
             raise
         except Exception as exc:
             raise AppError.translated("E303", "error.mount_failed", reason=str(exc)) from exc
-        return root_mount
+        return root_mount, root_device
 
     def mount_efi_partition(self, efi_part: str, root_mount: Path) -> Path:
         efi_mount = root_mount / "boot/efi"
@@ -70,3 +104,8 @@ class PartitionService:
     def unmount_device(self, device: str) -> None:
         escaped = device.replace("/", "\\/")
         self.runner.run(["bash", "-lc", f"mount | awk '$1 ~ /^{escaped}/ {{print $3}}' | xargs -r -n1 umount"], check=False)
+
+    def close_encrypted_root(self, mapper_name: str | None) -> None:
+        if not mapper_name:
+            return
+        self.runner.run(["cryptsetup", "close", mapper_name], check=False)

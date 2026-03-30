@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import logging
+import string
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
+    QCheckBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QProgressBar,
@@ -19,8 +22,10 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from src.core.errors import set_error_language
 from src.core.state import ExecutionState
 from src.core.workflow import Workflow
+from src.gui.i18n import build_translator, detect_system_language
 from src.infra.chroot import ChrootHelper
 from src.infra.command_runner import CommandRunner
 from src.infra.logger import AppLogger
@@ -49,9 +54,13 @@ class DeviceLoadWorker(QObject):
     finished = pyqtSignal(list)
     failed = pyqtSignal(str)
 
+    def __init__(self, language: str) -> None:
+        super().__init__()
+        self.language = language
+
     def run(self) -> None:
         try:
-            _, device_service = build_services(verbose=False)
+            _, device_service = build_services(verbose=False, language=self.language)
             devices = device_service.list_target_devices()
             self.finished.emit(devices)
         except Exception as exc:
@@ -63,14 +72,16 @@ class DiagnosticWorker(QObject):
     failed = pyqtSignal(str)
     log = pyqtSignal(str)
 
-    def __init__(self, target_device: str) -> None:
+    def __init__(self, target_device: str, language: str, options: dict | None = None) -> None:
         super().__init__()
         self.target_device = target_device
+        self.language = language
+        self.options = options or {}
 
     def run(self) -> None:
-        state = ExecutionState(mode="create", target_device=self.target_device)
+        state = ExecutionState(mode="create", target_device=self.target_device, options=dict(self.options))
         try:
-            controller, _ = build_services(verbose=False, log_signal=self.log)
+            controller, _ = build_services(verbose=False, log_signal=self.log, language=self.language)
             result = controller.precheck(state)
             self.finished.emit(result)
         except Exception as exc:
@@ -83,18 +94,20 @@ class CreateWorker(QObject):
     progress = pyqtSignal(int, str)
     log = pyqtSignal(str)
 
-    def __init__(self, target_device: str) -> None:
+    def __init__(self, target_device: str, language: str, options: dict | None = None) -> None:
         super().__init__()
         self.target_device = target_device
+        self.language = language
+        self.options = options or {}
 
     def run(self) -> None:
         state = ExecutionState(
             mode="create",
             target_device=self.target_device,
-            options={"yes": True, "force": False, "verbose": False},
+            options={"yes": True, "force": False, "verbose": False, **self.options},
         )
         try:
-            controller, _ = build_services(verbose=False, log_signal=self.log)
+            controller, _ = build_services(verbose=False, log_signal=self.log, language=self.language)
             state.add_progress_listener(self.progress.emit)
             result = controller.run(state)
             self.finished.emit(result)
@@ -114,7 +127,12 @@ class ControllerFacade:
         return self.workflow.run_create(state)
 
 
-def build_services(verbose: bool, log_signal: pyqtSignal | None = None) -> tuple[ControllerFacade, DeviceService]:
+def build_services(
+    verbose: bool,
+    log_signal: pyqtSignal | None = None,
+    language: str = "ja",
+) -> tuple[ControllerFacade, DeviceService]:
+    set_error_language(language)
     logger = AppLogger()
     logger.configure(verbose=verbose)
 
@@ -131,14 +149,16 @@ def build_services(verbose: bool, log_signal: pyqtSignal | None = None) -> tuple
     boot = BootService(runner, chroot)
     optimize = OptimizeService()
     firstboot = FirstbootService()
-    workflow = Workflow(device, partition, copy, boot, optimize, firstboot, logger)
+    workflow = Workflow(device, partition, copy, boot, optimize, firstboot, logger, language=language)
     return ControllerFacade(workflow), device
 
 
 class MainWindow(QMainWindow):
-    def __init__(self) -> None:
+    def __init__(self, language: str | None = None) -> None:
         super().__init__()
-        self.setWindowTitle("oYo Portable System Creator")
+        self.language = detect_system_language() if language is None else language
+        self.t = build_translator(self.language)
+        self.setWindowTitle(self.t("app.title"))
         self.worker_thread: QThread | None = None
         self.worker: QObject | None = None
         self.current_worker_kind: str | None = None
@@ -147,36 +167,45 @@ class MainWindow(QMainWindow):
         self.doctor_ok = False
         self.last_doctor_device = ""
 
-        self.status_label = QLabel("USBデバイスを選択してください。")
+        self.status_label = QLabel(self.t("status.select_device"))
         self.status_label.setObjectName("StatusLabel")
 
-        self.description_label = QLabel(
-            "現在のシステムから、BIOS / UEFI 両対応の Portable USB を作成します。"
-        )
+        self.description_label = QLabel(self.t("description.create_portable"))
         self.description_label.setWordWrap(True)
         self.description_label.setObjectName("DescriptionLabel")
 
-        self.device_label = QLabel("USBデバイス")
+        self.device_label = QLabel(self.t("label.device"))
         self.device_label.setFixedWidth(84)
 
         self.device_combo = QComboBox()
         self.device_combo.setMinimumWidth(440)
         self.device_combo.currentIndexChanged.connect(self._on_device_changed)
 
-        self.reload_button = QPushButton("再読込")
+        self.reload_button = QPushButton(self.t("button.reload"))
         self.reload_button.setFixedWidth(104)
         self.reload_button.clicked.connect(self.reload_devices)
 
-        self.diagnose_button = QPushButton("診断")
+        self.diagnose_button = QPushButton(self.t("button.diagnose"))
         self.diagnose_button.setFixedWidth(104)
         self.diagnose_button.clicked.connect(self.run_diagnostic)
 
-        self.create_button = QPushButton("Portable USB 作成")
+        self.create_button = QPushButton(self.t("button.create"))
         self.create_button.clicked.connect(self.run_create)
+
+        self.encryption_checkbox = QCheckBox(self.t("security.enable_encryption"))
+        self.encryption_checkbox.toggled.connect(self._on_encryption_toggled)
+        self.luks_password_label = QLabel(self.t("security.luks_password"))
+        self.luks_password_confirm_label = QLabel(self.t("security.confirm_password"))
+        self.luks_password_input = QLineEdit()
+        self.luks_password_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.luks_password_confirm_input = QLineEdit()
+        self.luks_password_confirm_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.show_password_checkbox = QCheckBox(self.t("security.show_password"))
+        self.show_password_checkbox.toggled.connect(self._on_show_password_toggled)
 
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
-        self.log_view.setPlaceholderText("ここに処理ログを表示します。")
+        self.log_view.setPlaceholderText(self.t("log.placeholder"))
         self.log_view.setMinimumHeight(220)
 
         self.progress_bar = QProgressBar()
@@ -210,6 +239,22 @@ class MainWindow(QMainWindow):
         device_layout.setColumnStretch(1, 1)
         outer.addWidget(device_frame)
 
+        security_frame = QFrame()
+        security_frame.setObjectName("Panel")
+        security_layout = QGridLayout(security_frame)
+        security_layout.setContentsMargins(12, 12, 12, 12)
+        security_layout.setHorizontalSpacing(8)
+        security_layout.setVerticalSpacing(8)
+        security_layout.addWidget(QLabel(self.t("security.title")), 0, 0, 1, 2)
+        security_layout.addWidget(self.encryption_checkbox, 1, 0, 1, 2)
+        security_layout.addWidget(self.luks_password_label, 2, 0)
+        security_layout.addWidget(self.luks_password_input, 2, 1)
+        security_layout.addWidget(self.luks_password_confirm_label, 3, 0)
+        security_layout.addWidget(self.luks_password_confirm_input, 3, 1)
+        security_layout.addWidget(self.show_password_checkbox, 4, 1)
+        security_layout.setColumnStretch(1, 1)
+        outer.addWidget(security_frame)
+
         action_row = QHBoxLayout()
         action_row.setSpacing(12)
         action_row.addWidget(self.diagnose_button)
@@ -225,7 +270,7 @@ class MainWindow(QMainWindow):
         log_layout = QVBoxLayout(log_frame)
         log_layout.setContentsMargins(16, 16, 16, 16)
         log_layout.setSpacing(10)
-        log_layout.addWidget(QLabel("ログ"))
+        log_layout.addWidget(QLabel(self.t("log.title")))
         log_layout.addWidget(self.log_view)
         outer.addWidget(log_frame, 1)
 
@@ -258,7 +303,7 @@ class MainWindow(QMainWindow):
                 border: 1px solid #d7d1ca;
                 border-radius: 10px;
             }
-            QComboBox, QTextEdit {
+            QComboBox, QTextEdit, QLineEdit {
                 background: #fbfaf8;
                 border: 1px solid #cfc8c0;
                 border-radius: 8px;
@@ -306,6 +351,7 @@ class MainWindow(QMainWindow):
             }
             """
         )
+        self._on_encryption_toggled(False)
 
     def _update_action_state(self) -> None:
         has_target = self._selected_device() is not None
@@ -362,15 +408,15 @@ class MainWindow(QMainWindow):
         target_display = self._format_device_display_from_path(state.target_device or "")
 
         lines = [
-            "診断結果: OK",
+            self.t("diagnostic.result.ok"),
             "",
-            "コピー元",
+            self.t("diagnostic.source"),
             f"  {source}",
             "",
-            "USBデバイス",
+            self.t("diagnostic.target"),
             f"  {target_display}",
             "",
-            f"  必要容量: {required_gib:.1f} GiB",
+            self.t("diagnostic.required_capacity", required_gib=required_gib),
         ]
         return "\n".join(lines)
 
@@ -395,45 +441,99 @@ class MainWindow(QMainWindow):
     def _on_device_changed(self, _index: int) -> None:
         self._invalidate_diagnostic()
 
+    def _on_encryption_toggled(self, checked: bool) -> None:
+        self.luks_password_label.setVisible(checked)
+        self.luks_password_input.setVisible(checked)
+        self.luks_password_confirm_label.setVisible(checked)
+        self.luks_password_confirm_input.setVisible(checked)
+        self.show_password_checkbox.setVisible(checked)
+        self._invalidate_diagnostic()
+
+    def _on_show_password_toggled(self, checked: bool) -> None:
+        echo_mode = QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
+        self.luks_password_input.setEchoMode(echo_mode)
+        self.luks_password_confirm_input.setEchoMode(echo_mode)
+
+    @staticmethod
+    def _validate_luks_password(password: str) -> None:
+        if password != password.strip():
+            raise ValueError("surrounding_whitespace")
+        if any(ch not in string.printable or ch in "\r\n\t\x0b\x0c" for ch in password):
+            raise ValueError("non_ascii")
+
+    def _build_create_options(self) -> dict:
+        if not self.encryption_checkbox.isChecked():
+            return {"encryption_enabled": False}
+
+        password = self.luks_password_input.text()
+        confirm = self.luks_password_confirm_input.text()
+        if not password:
+            raise ValueError(self.t("error.luks_password_required"))
+        try:
+            self._validate_luks_password(password)
+        except ValueError as exc:
+            if str(exc) == "surrounding_whitespace":
+                raise ValueError(self.t("error.luks_password_whitespace")) from exc
+            if str(exc) == "non_ascii":
+                raise ValueError(self.t("error.luks_password_ascii_only")) from exc
+            raise
+        if password != confirm:
+            raise ValueError(self.t("error.luks_password_mismatch"))
+        return {
+            "encryption_enabled": True,
+            "luks_passphrase": password,
+            "luks_mapper_name": "oyoport-cryptroot",
+        }
+
     def reload_devices(self) -> None:
         self._invalidate_diagnostic()
-        self._set_status("USBデバイス一覧を取得しています。")
-        self._start_worker(DeviceLoadWorker(), self._on_devices_loaded)
+        self._set_status(self.t("status.loading_devices"))
+        self._start_worker(DeviceLoadWorker(self.language), self._on_devices_loaded)
 
     def run_diagnostic(self) -> None:
         target = self._selected_device()
         if target is None:
             return
+        try:
+            options = self._build_create_options()
+        except ValueError as exc:
+            QMessageBox.critical(self, self.t("dialog.error.title"), str(exc))
+            return
         self.log_view.clear()
         self._invalidate_diagnostic()
-        self._append_log(f"診断を開始します: target={target}")
-        self._set_status("診断を実行しています。")
-        self._start_worker(DiagnosticWorker(target), self._on_diagnostic_finished)
+        self._append_log(self.t("log.start_diagnostic", target=target))
+        self._set_status(self.t("status.running_diagnostic"))
+        self._start_worker(DiagnosticWorker(target, self.language, options), self._on_diagnostic_finished)
 
     def run_create(self) -> None:
         target = self._selected_device()
         if target is None:
             return
+        try:
+            options = self._build_create_options()
+        except ValueError as exc:
+            QMessageBox.critical(self, self.t("dialog.error.title"), str(exc))
+            return
         if not self.doctor_ok or self.last_doctor_device != target:
-            QMessageBox.warning(self, "診断未完了", "先に診断を実行し、結果を確認してください。")
+            QMessageBox.warning(
+                self,
+                self.t("dialog.diagnostic_required.title"),
+                self.t("dialog.diagnostic_required.body"),
+            )
             return
 
         dialog = QMessageBox(self)
-        dialog.setWindowTitle("確認")
+        dialog.setWindowTitle(self.t("dialog.confirm.title"))
         dialog.setIcon(QMessageBox.Icon.Question)
-        dialog.setText(
-            "選択したUSBデバイスの内容はすべて消去されます。\n\n"
-            f"USBデバイス: {self._format_selected_device_display(target)}\n\n"
-            "Portable System を作成します。続行しますか？"
-        )
+        dialog.setText(self.t("dialog.confirm.body", device=self._format_selected_device_display(target)))
         dialog.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         dialog.setDefaultButton(QMessageBox.StandardButton.No)
         yes_button = dialog.button(QMessageBox.StandardButton.Yes)
         no_button = dialog.button(QMessageBox.StandardButton.No)
         if yes_button is not None:
-            yes_button.setText("はい")
+            yes_button.setText(self.t("button.yes"))
         if no_button is not None:
-            no_button.setText("いいえ")
+            no_button.setText(self.t("button.no"))
         answer = QMessageBox.StandardButton(dialog.exec())
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -441,9 +541,9 @@ class MainWindow(QMainWindow):
         self.log_view.clear()
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("%p%")
-        self._append_log(f"Portable USB 作成を開始します: target={target}")
-        self._set_status("Portable USB を作成しています。")
-        self._start_worker(CreateWorker(target), self._on_create_finished)
+        self._append_log(self.t("log.start_create", target=target))
+        self._set_status(self.t("status.running_create"))
+        self._start_worker(CreateWorker(target, self.language, options), self._on_create_finished)
 
     def _start_worker(self, worker: QObject, finished_handler) -> None:
         if self.worker_thread is not None and self.worker_thread.isRunning():
@@ -486,7 +586,7 @@ class MainWindow(QMainWindow):
             self.device_records[path] = device
 
         if not devices:
-            self._set_status("使用可能な USB デバイスがありません。")
+            self._set_status(self.t("status.no_devices"))
         else:
             self._set_status("")
         self._update_action_state()
@@ -497,24 +597,26 @@ class MainWindow(QMainWindow):
         self.doctor_ok = True
         self.last_doctor_device = state.target_device or ""
         self.progress_bar.setValue(100)
-        self.progress_bar.setFormat("診断完了")
+        self.progress_bar.setFormat(self.t("progress.diagnostic_done"))
         self._append_log(
-            "診断完了: "
-            f"target={state.target_device} "
-            f"source={source} "
-            f"used={state.used_bytes} "
-            f"required={state.required_bytes}"
+            self.t(
+                "log.diagnostic_done",
+                target=state.target_device,
+                source=source,
+                used=state.used_bytes,
+                required=state.required_bytes,
+            )
         )
-        self._set_status("診断が完了しました。")
-        self._show_message_dialog("診断結果", diagnostic_text)
+        self._set_status(self.t("status.diagnostic_done"))
+        self._show_message_dialog(self.t("dialog.diagnostic_result.title"), diagnostic_text)
         self._update_action_state()
 
     def _on_create_finished(self, state: ExecutionState) -> None:
-        self._append_log(f"作成完了: target={state.target_device}")
+        self._append_log(self.t("log.create_done", target=state.target_device))
         self.progress_bar.setValue(100)
-        self.progress_bar.setFormat("作成完了")
-        self._set_status("Portable USB の作成が完了しました。")
-        self._show_message_dialog("完了", "Portable USB の作成が完了しました。")
+        self.progress_bar.setFormat(self.t("progress.create_done"))
+        self._set_status(self.t("status.create_done"))
+        self._show_message_dialog(self.t("dialog.done.title"), self.t("dialog.done.body"))
 
     def _on_progress(self, percent: int, step: str) -> None:
         self.progress_bar.setFormat("%p%")
@@ -525,9 +627,9 @@ class MainWindow(QMainWindow):
     def _on_worker_failed(self, message: str) -> None:
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("%p%")
-        self._append_log(f"失敗: {message}")
-        self._set_status("処理に失敗しました。")
-        QMessageBox.critical(self, "エラー", message)
+        self._append_log(self.t("log.failed", message=message))
+        self._set_status(self.t("status.failed"))
+        QMessageBox.critical(self, self.t("dialog.error.title"), message)
 
     def _on_worker_stopped(self) -> None:
         self.worker = None
@@ -547,8 +649,9 @@ class MainWindow(QMainWindow):
 
 def run_gui() -> int:
     app = QApplication([])
-    app.setApplicationName("oYo Portable System Creator")
-    w = MainWindow()
+    language = detect_system_language()
+    app.setApplicationName(build_translator(language)("app.title"))
+    w = MainWindow(language=language)
     w.resize(920, 520)
     w.show()
     return app.exec()

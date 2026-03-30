@@ -25,6 +25,10 @@ REQUIRED_COMMANDS = [
     "update-initramfs",
 ]
 
+ENCRYPTION_REQUIRED_COMMANDS = [
+    "cryptsetup",
+]
+
 
 class DeviceService:
     def __init__(self, runner: CommandRunner, logger: AppLogger) -> None:
@@ -36,12 +40,15 @@ class DeviceService:
 
     def check_root(self) -> None:
         if os.geteuid() != 0:
-            raise AppError("E121", "root 権限で実行してください")
+            raise AppError.translated("E121", "error.root_required")
 
-    def check_required_commands(self) -> None:
-        missing = [c for c in REQUIRED_COMMANDS if shutil.which(c) is None]
+    def check_required_commands(self, *, encryption_enabled: bool = False) -> None:
+        required_commands = REQUIRED_COMMANDS[:]
+        if encryption_enabled:
+            required_commands.extend(ENCRYPTION_REQUIRED_COMMANDS)
+        missing = [c for c in required_commands if shutil.which(c) is None]
         if missing:
-            raise AppError("E122", f"必須コマンド不足: {', '.join(missing)}")
+            raise AppError.translated("E122", "error.required_commands_missing", commands=", ".join(missing))
 
     def list_target_devices(self) -> list[dict]:
         result = self.runner.run(
@@ -67,9 +74,9 @@ class DeviceService:
         candidate_paths = {(d.get("path") or f"/dev/{d['name']}") for d in candidates}
         root_disk = self._root_disk_path()
         if target_device == root_disk:
-            raise AppError("E203", "システムディスクは指定できません")
+            raise AppError.translated("E203", "error.system_disk_not_allowed")
         if target_device not in candidate_paths:
-            raise AppError("E201", "コピー先デバイスが不正です（USB/リムーバブルのみ指定可）")
+            raise AppError.translated("E201", "error.invalid_target_device")
 
     def estimate_required_bytes(self, copy_bytes: int) -> int:
         required = int(copy_bytes * 1.15) + (4 * 1024**3)
@@ -89,7 +96,12 @@ class DeviceService:
             f"required={self._format_gib(required_bytes)}"
         )
         if size < required_bytes:
-            raise AppError("E202", f"容量不足です: required={required_bytes}, device={size}")
+            raise AppError.translated(
+                "E202",
+                "error.insufficient_capacity",
+                required_bytes=required_bytes,
+                device_bytes=size,
+            )
 
     def get_device_size_bytes(self, target_device: str) -> int:
         result = self.runner.run(["lsblk", "--json", "-b", "-o", "PATH,SIZE"], check=True)
@@ -98,7 +110,7 @@ class DeviceService:
             path = item.get("path")
             if path == target_device:
                 return int(item.get("size") or 0)
-        raise AppError("E201", f"対象デバイスが見つかりません: {target_device}")
+        raise AppError.translated("E201", "error.target_device_not_found", target_device=target_device)
 
     def _root_disk_path(self) -> str:
         result = self.runner.run(["findmnt", "-n", "-o", "SOURCE", "/"], check=True)

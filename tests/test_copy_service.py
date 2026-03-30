@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 
 from src.services.copy_service import CopyService
 
@@ -54,6 +56,26 @@ class CopyServiceTests(unittest.TestCase):
         command = self.service._build_rsync_command("/", "/target", mode="backup")
 
         self.assertNotIn("--filter", command)
+
+    def test_write_fstab_uses_mapper_when_encryption_is_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+
+            self.service.write_fstab(
+                root,
+                "ROOT-UUID",
+                "EFI-UUID",
+                encryption_enabled=True,
+                mapper_name="oyoport-cryptroot",
+                luks_uuid="LUKS-UUID",
+            )
+
+            fstab = (root / "etc/fstab").read_text(encoding="utf-8")
+            crypttab = (root / "etc/crypttab").read_text(encoding="utf-8")
+
+            self.assertIn("/dev/mapper/oyoport-cryptroot / ext4", fstab)
+            self.assertIn("UUID=EFI-UUID /boot/efi", fstab)
+            self.assertEqual(crypttab, "oyoport-cryptroot UUID=LUKS-UUID none luks,discard\n")
 
 
 if __name__ == "__main__":
