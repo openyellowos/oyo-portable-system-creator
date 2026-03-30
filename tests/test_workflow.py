@@ -56,14 +56,16 @@ class DummyPartitionService:
         self.work_root = work_root
         self.calls: list[tuple[str, str]] = []
 
-    def prepare_device(self, target_device: str) -> tuple[str, str]:
-        return ("/dev/fake-efi", "/dev/fake-root")
+    def prepare_device(self, target_device: str) -> tuple[str, str, str]:
+        return ("/dev/fake-efi", "/dev/fake-boot", "/dev/fake-root")
 
-    def make_filesystems_and_mount(self, efi: str, root: str, workdir: Path, **_: object) -> Path:
+    def make_filesystems_and_mount(self, efi: str, boot: str, root: str, workdir: Path, **_: object) -> Path:
         self.calls.append(("root", efi))
         root_mount = self.work_root / "root"
         root_mount.mkdir(parents=True, exist_ok=True)
-        return root_mount, "/dev/fake-root"
+        boot_mount = root_mount / "boot"
+        boot_mount.mkdir(parents=True, exist_ok=True)
+        return root_mount, "/dev/fake-root", boot_mount
 
     def mount_efi_partition(self, efi: str, root_mount: Path) -> Path:
         self.calls.append(("efi", efi))
@@ -88,7 +90,7 @@ class DummyCopyService:
     def rsync_copy(self, source: str, target_root: Path, mode: str) -> None:
         self.rsync_calls.append((source, target_root, mode))
 
-    def write_fstab(self, target_root: Path, root_uuid: str, efi_uuid: str, **_: object) -> None:
+    def write_fstab(self, target_root: Path, root_uuid: str, boot_uuid: str, efi_uuid: str, **_: object) -> None:
         return None
 
 
@@ -96,7 +98,7 @@ class DummyBootService:
     def __init__(self) -> None:
         self.calls: list[tuple[str, Path]] = []
 
-    def install_grub(self, root_mount: Path, target_device: str, root_uuid: str, **_: object) -> None:
+    def install_grub(self, root_mount: Path, target_device: str, boot_uuid: str, **_: object) -> None:
         self.calls.append(("install_grub", root_mount))
         return None
 

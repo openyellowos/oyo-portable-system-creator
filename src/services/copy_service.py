@@ -177,6 +177,7 @@ class CopyService:
         self,
         target_root: Path,
         root_uuid: str,
+        boot_uuid: str,
         efi_uuid: str,
         *,
         encryption_enabled: bool = False,
@@ -189,7 +190,11 @@ class CopyService:
         try:
             body = template.read_text(encoding="utf-8")
             root_spec = f"/dev/mapper/{mapper_name}" if encryption_enabled else f"UUID={root_uuid}"
-            body = body.replace("{{ROOT_SPEC}}", root_spec).replace("{{EFI_UUID}}", efi_uuid)
+            body = (
+                body.replace("{{ROOT_SPEC}}", root_spec)
+                .replace("{{BOOT_UUID}}", boot_uuid)
+                .replace("{{EFI_UUID}}", efi_uuid)
+            )
             fstab.write_text(body, encoding="utf-8")
             crypttab = target_root / "etc/crypttab"
             if encryption_enabled and luks_uuid:

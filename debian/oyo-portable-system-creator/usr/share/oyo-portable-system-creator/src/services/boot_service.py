@@ -12,33 +12,20 @@ class BootService:
         self.runner = runner
         self.chroot = chroot
 
-    def install_grub(
-        self,
-        root_mount: Path,
-        target_device: str,
-        root_uuid: str,
-        *,
-        encryption_enabled: bool = False,
-        luks_uuid: str | None = None,
-    ) -> None:
+    def install_grub(self, root_mount: Path, target_device: str, boot_uuid: str) -> None:
         try:
             if not target_device:
                 raise AppError.translated("E501", "error.empty_grub_target_device")
-            if not root_uuid or root_uuid == "UNKNOWN":
+            if not boot_uuid or boot_uuid == "UNKNOWN":
                 raise AppError.translated("E501", "error.root_uuid_unavailable")
-            if encryption_enabled and (not luks_uuid or luks_uuid == "UNKNOWN"):
-                raise AppError.translated("E501", "error.luks_uuid_unavailable")
-
-            if encryption_enabled:
-                self._configure_grub_for_encrypted_root(root_mount)
 
             self.chroot.run_in_chroot(
                 root_mount,
                 [
                     "/usr/sbin/grub-install",
                     "--target=i386-pc",
-                    "--boot-directory=/boot/efi/boot",
-                    f"--modules={self._grub_modules(encryption_enabled)}",
+                    "--boot-directory=/boot",
+                    "--modules=part_gpt fat ext2",
                     "--recheck",
                     target_device,
                 ],
@@ -50,12 +37,12 @@ class BootService:
                     "--target=x86_64-efi",
                     "--efi-directory=/boot/efi",
                     "--bootloader-id=OYOPORT",
-                    f"--modules={self._grub_modules(encryption_enabled)}",
+                    "--modules=part_gpt fat ext2",
                     "--no-nvram",
                     "--removable",
                 ],
             )
-            self._write_portable_grub_configs(root_mount, root_uuid, encryption_enabled=encryption_enabled, luks_uuid=luks_uuid)
+            self._write_portable_grub_configs(root_mount, boot_uuid)
             self._ensure_portable_efi_bootloader(root_mount)
         except AppError:
             raise
@@ -81,36 +68,19 @@ class BootService:
         except Exception as exc:
             raise AppError.translated("E503", "error.grub_cfg_update_failed", reason=str(exc)) from exc
 
-    def _write_portable_grub_configs(
-        self,
-        root_mount: Path,
-        root_uuid: str,
-        *,
-        encryption_enabled: bool = False,
-        luks_uuid: str | None = None,
-    ) -> None:
+    def _write_portable_grub_configs(self, root_mount: Path, boot_uuid: str) -> None:
         portable_cfg = root_mount / "boot/efi/boot/grub/grub.cfg"
         efi_chain_cfg_paths = self._efi_chain_config_paths(root_mount)
 
         try:
             portable_cfg.parent.mkdir(parents=True, exist_ok=True)
             portable_cfg.write_text(
-                self._efi_chain_grub_config(
-                    "/boot/grub/grub.cfg",
-                    root_uuid,
-                    encryption_enabled=encryption_enabled,
-                    luks_uuid=luks_uuid,
-                ),
+                self._efi_chain_grub_config("/grub/grub.cfg", boot_uuid),
                 encoding="utf-8",
             )
             portable_cfg.chmod(0o644)
 
-            efi_chain = self._efi_chain_grub_config(
-                "/boot/grub/grub.cfg",
-                root_uuid,
-                encryption_enabled=encryption_enabled,
-                luks_uuid=luks_uuid,
-            )
+            efi_chain = self._efi_chain_grub_config("/grub/grub.cfg", boot_uuid)
             for path in efi_chain_cfg_paths:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(efi_chain, encoding="utf-8")
@@ -191,34 +161,7 @@ class BootService:
         return None
 
     @staticmethod
-    def _grub_modules(encryption_enabled: bool) -> str:
-        modules = ["part_gpt", "fat", "ext2"]
-        if encryption_enabled:
-            modules.extend(["luks", "luks2", "cryptodisk", "gcry_rijndael", "gcry_sha256"])
-        return " ".join(modules)
-
-    def _configure_grub_for_encrypted_root(self, root_mount: Path) -> None:
-        default_grub = root_mount / "etc/default/grub"
-        try:
-            body = default_grub.read_text(encoding="utf-8") if default_grub.exists() else ""
-            if "GRUB_ENABLE_CRYPTODISK=y" not in body:
-                if body and not body.endswith("\n"):
-                    body += "\n"
-                body += "GRUB_ENABLE_CRYPTODISK=y\n"
-                default_grub.parent.mkdir(parents=True, exist_ok=True)
-                default_grub.write_text(body, encoding="utf-8")
-        except OSError as exc:
-            raise AppError.translated("E501", "error.grub_config_write_failed", reason=str(exc)) from exc
-
-    @classmethod
-    def _efi_chain_grub_config(
-        cls,
-        target_config: str,
-        root_uuid: str,
-        *,
-        encryption_enabled: bool = False,
-        luks_uuid: str | None = None,
-    ) -> str:
+    def _efi_chain_grub_config(target_config: str, boot_uuid: str) -> str:
         lines = [
             "set default=0",
             "set timeout=5",
@@ -226,20 +169,6 @@ class BootService:
             "insmod part_gpt",
             "insmod ext2",
         ]
-        if encryption_enabled:
-            lines.extend(
-                [
-                    "insmod luks",
-                    "insmod luks2",
-                    "insmod cryptodisk",
-                    "insmod gcry_rijndael",
-                    "insmod gcry_sha256",
-                    f"cryptomount -u {luks_uuid}",
-                    "set root=(crypto0)",
-                    "set prefix=($root)/boot/grub",
-                ]
-            )
-        else:
-            lines.append(f"search --no-floppy --fs-uuid --set=root {root_uuid}")
+        lines.append(f"search --no-floppy --fs-uuid --set=root {boot_uuid}")
         lines.append(f"configfile {target_config}")
         return "\n".join(lines) + "\n"

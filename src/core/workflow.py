@@ -67,12 +67,13 @@ class Workflow:
             self.precheck(state)
             self._update_progress(state, 15, self.translate("workflow.precheck.done"))
             self._update_progress(state, 20, self.translate("workflow.partition.create"))
-            efi, root = self.partition_service.prepare_device(state.target_device or "")
+            efi, boot, root = self.partition_service.prepare_device(state.target_device or "")
             self._update_progress(state, 30, self.translate("workflow.fs.mount"))
             encryption_enabled = bool(state.options.get("encryption_enabled"))
             mapper_name = str(state.options.get("luks_mapper_name") or "oyoport-cryptroot")
-            root_mount, root_device = self.partition_service.make_filesystems_and_mount(
+            root_mount, root_device, boot_mount = self.partition_service.make_filesystems_and_mount(
                 efi,
+                boot,
                 root,
                 workdir,
                 encryption_enabled=encryption_enabled,
@@ -80,6 +81,7 @@ class Workflow:
                 mapper_name=mapper_name,
             )
             state.mounted_paths.append(str(root_mount))
+            state.mounted_paths.append(str(boot_mount))
             state.metadata["root_device"] = root_device
             if encryption_enabled:
                 state.metadata["luks_uuid"] = self._blkid(root)
@@ -96,10 +98,12 @@ class Workflow:
 
             self._update_progress(state, 60, self.translate("workflow.fstab"))
             root_uuid = self._blkid(str(state.metadata.get("root_device") or root))
+            boot_uuid = self._blkid(boot)
             efi_uuid = self._blkid(efi)
             self.copy_service.write_fstab(
                 root_mount,
                 root_uuid,
+                boot_uuid,
                 efi_uuid,
                 encryption_enabled=encryption_enabled,
                 mapper_name=mapper_name,
@@ -110,9 +114,7 @@ class Workflow:
             self.boot_service.install_grub(
                 root_mount,
                 state.target_device or "",
-                root_uuid,
-                encryption_enabled=encryption_enabled,
-                luks_uuid=state.metadata.get("luks_uuid"),
+                boot_uuid,
             )
             self._update_progress(state, 78, self.translate("workflow.initramfs"))
             self.boot_service.update_initramfs(root_mount)

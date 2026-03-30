@@ -1,4 +1,10 @@
-oyo-portable-system-creator (0.5.0) UNRELEASED; urgency=medium
+oyo-portable-system-creator (0.5.1) UNRELEASED; urgency=medium
+
+  * 暗号化解除時にパスワードが２回聞かれる問題を修正
+
+ -- toshio <solution92001@gmail.com>  Mon, 30 Mar 2026 22:36:48 +0900
+
+oyo-portable-system-creator (0.5.0) unstable; urgency=medium
 
   * USBメモリの暗号化機能を追加
 

@@ -19,6 +19,7 @@ REQUIRED_COMMANDS = [
     "mkfs.ext4",
     "mount",
     "umount",
+    "swapoff",
     "chroot",
     "rsync",
     "grub-install",

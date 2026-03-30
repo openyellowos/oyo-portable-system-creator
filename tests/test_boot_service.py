@@ -69,9 +69,9 @@ class BootServiceTests(unittest.TestCase):
         installed_binary = (self.root / "boot/efi/EFI/OYOPORT/grubx64.efi").read_bytes()
 
         self.assertIn("search --no-floppy --fs-uuid --set=root 1234-ABCD", portable_cfg)
-        self.assertIn("configfile /boot/grub/grub.cfg", portable_cfg)
+        self.assertIn("configfile /grub/grub.cfg", portable_cfg)
         self.assertIn("search --no-floppy --fs-uuid --set=root 1234-ABCD", efi_chain_cfg)
-        self.assertIn("configfile /boot/grub/grub.cfg", efi_chain_cfg)
+        self.assertIn("configfile /grub/grub.cfg", efi_chain_cfg)
         self.assertEqual(vendor_chain_cfg, efi_chain_cfg)
         self.assertEqual(removable_binary, b"generated-efi")
         self.assertEqual(alias_binary, b"generated-efi")
@@ -84,7 +84,7 @@ class BootServiceTests(unittest.TestCase):
                     [
                         "/usr/sbin/grub-install",
                         "--target=i386-pc",
-                        "--boot-directory=/boot/efi/boot",
+                        "--boot-directory=/boot",
                         "--modules=part_gpt fat ext2",
                         "--recheck",
                         "/dev/sdz",
@@ -104,25 +104,6 @@ class BootServiceTests(unittest.TestCase):
                 ),
             ],
         )
-
-    def test_install_grub_enables_cryptodisk_when_root_is_encrypted(self) -> None:
-        self.service.install_grub(
-            self.root,
-            "/dev/sdz",
-            "1234-ABCD",
-            encryption_enabled=True,
-            luks_uuid="LUKS-UUID",
-        )
-
-        default_grub = (self.root / "etc/default/grub").read_text(encoding="utf-8")
-        portable_cfg = (self.root / "boot/efi/boot/grub/grub.cfg").read_text(encoding="utf-8")
-
-        self.assertIn("GRUB_ENABLE_CRYPTODISK=y", default_grub)
-        self.assertIn("cryptomount -u LUKS-UUID", portable_cfg)
-        self.assertIn("set root=(crypto0)", portable_cfg)
-        self.assertIn("set prefix=($root)/boot/grub", portable_cfg)
-        self.assertIn("--modules=part_gpt fat ext2 luks luks2 cryptodisk gcry_rijndael gcry_sha256", self.chroot.calls[0][1])
-        self.assertIn("insmod luks2", portable_cfg)
 
     def test_refresh_grub_config_generates_root_grub_cfg(self) -> None:
         self.service.refresh_grub_config(self.root)

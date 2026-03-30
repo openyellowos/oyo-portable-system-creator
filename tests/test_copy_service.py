@@ -64,6 +64,7 @@ class CopyServiceTests(unittest.TestCase):
             self.service.write_fstab(
                 root,
                 "ROOT-UUID",
+                "BOOT-UUID",
                 "EFI-UUID",
                 encryption_enabled=True,
                 mapper_name="oyoport-cryptroot",
@@ -74,6 +75,7 @@ class CopyServiceTests(unittest.TestCase):
             crypttab = (root / "etc/crypttab").read_text(encoding="utf-8")
 
             self.assertIn("/dev/mapper/oyoport-cryptroot / ext4", fstab)
+            self.assertIn("UUID=BOOT-UUID /boot ext4", fstab)
             self.assertIn("UUID=EFI-UUID /boot/efi", fstab)
             self.assertEqual(crypttab, "oyoport-cryptroot UUID=LUKS-UUID none luks,discard\n")
 
