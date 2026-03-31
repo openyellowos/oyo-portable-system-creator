@@ -15,7 +15,7 @@ b07e3cbca54615e193bc77ad1f17dd0d  usr/share/oyo-portable-system-creator/src/core
 64c97647a1a450a182362f6b04c90f27  usr/share/oyo-portable-system-creator/src/core/workflow.py
 d41d8cd98f00b204e9800998ecf8427e  usr/share/oyo-portable-system-creator/src/gui/__init__.py
 4922cc8c2559d1c7b2fd86a1c3204a1f  usr/share/oyo-portable-system-creator/src/gui/i18n.py
-0e325ddb351d050f128c4849561fb97c  usr/share/oyo-portable-system-creator/src/gui/main_window.py
+b6b4ecb233463448941b5c78177de14f  usr/share/oyo-portable-system-creator/src/gui/main_window.py
 945c1604b169073d8b6b703355b2ec51  usr/share/oyo-portable-system-creator/src/gui/wizard_pages.py
 d41d8cd98f00b204e9800998ecf8427e  usr/share/oyo-portable-system-creator/src/infra/__init__.py
 831361d98a80205f034df326127ddbce  usr/share/oyo-portable-system-creator/src/infra/chroot.py

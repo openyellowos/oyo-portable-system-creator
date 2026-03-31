@@ -159,6 +159,7 @@ class MainWindow(QMainWindow):
         self.language = detect_system_language() if language is None else language
         self.t = build_translator(self.language)
         self.setWindowTitle(self.t("app.title"))
+        self.setMinimumSize(920, 620)
         self.worker_thread: QThread | None = None
         self.worker: QObject | None = None
         self.current_worker_kind: str | None = None
@@ -175,10 +176,12 @@ class MainWindow(QMainWindow):
         self.description_label.setObjectName("DescriptionLabel")
 
         self.device_label = QLabel(self.t("label.device"))
-        self.device_label.setFixedWidth(84)
+        self.device_label.setObjectName("FieldLabel")
+        self.device_label.setFixedWidth(96)
 
         self.device_combo = QComboBox()
-        self.device_combo.setMinimumWidth(440)
+        self.device_combo.setMinimumWidth(520)
+        self.device_combo.setPlaceholderText(self.t("status.no_devices"))
         self.device_combo.currentIndexChanged.connect(self._on_device_changed)
 
         self.reload_button = QPushButton(self.t("button.reload"))
@@ -195,18 +198,22 @@ class MainWindow(QMainWindow):
         self.encryption_checkbox = QCheckBox(self.t("security.enable_encryption"))
         self.encryption_checkbox.toggled.connect(self._on_encryption_toggled)
         self.luks_password_label = QLabel(self.t("security.luks_password"))
+        self.luks_password_label.setObjectName("FieldLabel")
         self.luks_password_confirm_label = QLabel(self.t("security.confirm_password"))
+        self.luks_password_confirm_label.setObjectName("FieldLabel")
         self.luks_password_input = QLineEdit()
         self.luks_password_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.luks_password_input.setFixedWidth(220)
         self.luks_password_confirm_input = QLineEdit()
         self.luks_password_confirm_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.luks_password_confirm_input.setFixedWidth(220)
         self.show_password_checkbox = QCheckBox(self.t("security.show_password"))
         self.show_password_checkbox.toggled.connect(self._on_show_password_toggled)
 
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setPlaceholderText(self.t("log.placeholder"))
-        self.log_view.setMinimumHeight(220)
+        self.log_view.setMinimumHeight(120)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
@@ -222,16 +229,16 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
 
         outer = QVBoxLayout(root)
-        outer.setContentsMargins(18, 14, 18, 18)
-        outer.setSpacing(12)
+        outer.setContentsMargins(18, 12, 18, 14)
+        outer.setSpacing(8)
 
         outer.addWidget(self.description_label)
 
         device_frame = QFrame()
         device_frame.setObjectName("Panel")
         device_layout = QGridLayout(device_frame)
-        device_layout.setContentsMargins(12, 12, 12, 12)
-        device_layout.setHorizontalSpacing(8)
+        device_layout.setContentsMargins(14, 8, 14, 8)
+        device_layout.setHorizontalSpacing(10)
         device_layout.setVerticalSpacing(4)
         device_layout.addWidget(self.device_label, 0, 0)
         device_layout.addWidget(self.device_combo, 0, 1)
@@ -242,21 +249,20 @@ class MainWindow(QMainWindow):
         security_frame = QFrame()
         security_frame.setObjectName("Panel")
         security_layout = QGridLayout(security_frame)
-        security_layout.setContentsMargins(12, 12, 12, 12)
-        security_layout.setHorizontalSpacing(8)
-        security_layout.setVerticalSpacing(8)
-        security_layout.addWidget(QLabel(self.t("security.title")), 0, 0, 1, 2)
-        security_layout.addWidget(self.encryption_checkbox, 1, 0, 1, 2)
-        security_layout.addWidget(self.luks_password_label, 2, 0)
-        security_layout.addWidget(self.luks_password_input, 2, 1)
-        security_layout.addWidget(self.luks_password_confirm_label, 3, 0)
-        security_layout.addWidget(self.luks_password_confirm_input, 3, 1)
-        security_layout.addWidget(self.show_password_checkbox, 4, 1)
-        security_layout.setColumnStretch(1, 1)
+        security_layout.setContentsMargins(14, 8, 14, 8)
+        security_layout.setHorizontalSpacing(14)
+        security_layout.setVerticalSpacing(6)
+        security_layout.addWidget(self.encryption_checkbox, 0, 0, 1, 5)
+        security_layout.addWidget(self.luks_password_label, 1, 0)
+        security_layout.addWidget(self.luks_password_input, 1, 1)
+        security_layout.addWidget(self.luks_password_confirm_label, 1, 2)
+        security_layout.addWidget(self.luks_password_confirm_input, 1, 3)
+        security_layout.addWidget(self.show_password_checkbox, 1, 4)
+        security_layout.setColumnStretch(4, 1)
         outer.addWidget(security_frame)
 
         action_row = QHBoxLayout()
-        action_row.setSpacing(12)
+        action_row.setSpacing(10)
         action_row.addWidget(self.diagnose_button)
         action_row.addWidget(self.create_button)
         action_row.addStretch(1)
@@ -265,14 +271,7 @@ class MainWindow(QMainWindow):
         outer.addWidget(self.status_label)
         outer.addWidget(self.progress_bar)
 
-        log_frame = QFrame()
-        log_frame.setObjectName("Panel")
-        log_layout = QVBoxLayout(log_frame)
-        log_layout.setContentsMargins(16, 16, 16, 16)
-        log_layout.setSpacing(10)
-        log_layout.addWidget(QLabel(self.t("log.title")))
-        log_layout.addWidget(self.log_view)
-        outer.addWidget(log_frame, 1)
+        outer.addWidget(self.log_view, 1)
 
     def _apply_style(self) -> None:
         self.setStyleSheet(
@@ -292,6 +291,10 @@ class MainWindow(QMainWindow):
                 padding-bottom: 2px;
                 min-height: 20px;
             }
+            #FieldLabel {
+                color: #3d3935;
+                font-weight: 500;
+            }
             #DescriptionLabel {
                 color: #111111;
                 background: transparent;
@@ -301,17 +304,20 @@ class MainWindow(QMainWindow):
             #Panel {
                 background: #f1efec;
                 border: 1px solid #d7d1ca;
-                border-radius: 10px;
+                border-radius: 7px;
             }
             QComboBox, QTextEdit, QLineEdit {
                 background: #fbfaf8;
                 border: 1px solid #cfc8c0;
-                border-radius: 8px;
-                padding: 8px;
+                border-radius: 5px;
+                padding: 6px 8px;
+            }
+            QLineEdit {
+                min-height: 20px;
             }
             QComboBox {
-                padding: 5px 8px;
-                min-height: 18px;
+                padding: 4px 8px;
+                min-height: 24px;
             }
             QComboBox::drop-down {
                 border: none;
@@ -320,23 +326,23 @@ class MainWindow(QMainWindow):
             QProgressBar {
                 background: #e2ddd6;
                 border: 1px solid #d0c8bf;
-                border-radius: 8px;
+                border-radius: 5px;
                 text-align: center;
                 color: #111111;
                 min-height: 22px;
             }
             QProgressBar::chunk {
                 background: #9fb9ef;
-                border-radius: 7px;
+                border-radius: 4px;
             }
             QPushButton {
                 background: #f7f4f0;
                 border: 1px solid #d1c9c0;
-                border-radius: 8px;
+                border-radius: 5px;
                 color: #111111;
                 font-weight: 500;
-                padding: 7px 14px;
-                min-height: 18px;
+                padding: 5px 14px;
+                min-height: 20px;
             }
             QPushButton:hover {
                 background: #efeae3;
