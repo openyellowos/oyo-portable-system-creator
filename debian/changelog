@@ -1,4 +1,10 @@
-oyo-portable-system-creator (0.5.2) UNRELEASED; urgency=medium
+oyo-portable-system-creator (0.5.3) UNRELEASED; urgency=medium
+
+  * homeディレクトリのコピー処理の不具合を修正
+
+ -- toshio <solution92001@gmail.com>  Sat, 04 Apr 2026 13:30:58 +0900
+
+oyo-portable-system-creator (0.5.2) unstable; urgency=medium
 
   * GUIのレイアウトを調整
 

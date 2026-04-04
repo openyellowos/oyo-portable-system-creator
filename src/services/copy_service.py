@@ -150,6 +150,7 @@ class CopyService:
         for directory in HOME_DIRS_COPY_EMPTY:
             rules.extend(
                 [
+                    f"+ /home/*/{directory}",
                     f"+ /home/*/{directory}/",
                     f"- /home/*/{directory}/***",
                 ]
@@ -158,6 +159,7 @@ class CopyService:
         for directory in HOME_DIRS_COPY_FULL:
             rules.extend(
                 [
+                    f"+ /home/*/{directory}",
                     f"+ /home/*/{directory}/",
                     f"+ /home/*/{directory}/***",
                 ]

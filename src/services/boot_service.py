@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from src.core.errors import AppError
@@ -59,6 +60,7 @@ class BootService:
 
     def refresh_grub_config(self, root_mount: Path) -> None:
         try:
+            self._ensure_portable_grub_defaults(root_mount)
             self.chroot.run_in_chroot(
                 root_mount,
                 ["/usr/sbin/grub-mkconfig", "-o", "/boot/grub/grub.cfg"],
@@ -87,6 +89,34 @@ class BootService:
                 path.chmod(0o644)
         except OSError as exc:
             raise AppError.translated("E501", "error.grub_config_write_failed", reason=str(exc)) from exc
+
+    def _ensure_portable_grub_defaults(self, root_mount: Path) -> None:
+        grub_defaults = root_mount / "etc/default/grub"
+        grub_defaults.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            body = grub_defaults.read_text(encoding="utf-8") if grub_defaults.exists() else ""
+            updated = self._set_kernel_arg(body, "GRUB_CMDLINE_LINUX", "rootwait")
+            grub_defaults.write_text(updated, encoding="utf-8")
+        except OSError as exc:
+            raise AppError.translated("E503", "error.grub_cfg_update_failed", reason=str(exc)) from exc
+
+    @staticmethod
+    def _set_kernel_arg(body: str, variable: str, arg: str) -> str:
+        pattern = re.compile(
+            rf"^(?P<key>{re.escape(variable)})=(?P<quote>[\"'])(?P<value>.*?)(?P=quote)(?P<newline>\n|$)",
+            re.MULTILINE,
+        )
+        match = pattern.search(body)
+        if match is None:
+            suffix = "" if not body or body.endswith("\n") else "\n"
+            return f"{body}{suffix}{variable}=\"{arg}\"\n"
+
+        current = match.group("value").split()
+        if arg not in current:
+            current.append(arg)
+        replacement = f"{variable}={match.group('quote')}{' '.join(current)}{match.group('quote')}"
+        return f"{body[:match.start()]}{replacement}{match.group('newline')}{body[match.end():]}"
 
     @staticmethod
     def _efi_chain_config_paths(root_mount: Path) -> list[Path]:

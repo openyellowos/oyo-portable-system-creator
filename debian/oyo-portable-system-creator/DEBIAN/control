@@ -1,8 +1,8 @@
 Package: oyo-portable-system-creator
-Version: 0.5.1
+Version: 0.5.3
 Architecture: all
 Maintainer: OYO Team <devnull@example.com>
-Installed-Size: 150
+Installed-Size: 151
 Depends: python3:any, python3-pyqt6, rsync, grub-pc-bin, grub-efi-amd64-bin, cryptsetup, cryptsetup-initramfs
 Section: utils
 Priority: optional

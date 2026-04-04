@@ -106,11 +106,17 @@ class BootServiceTests(unittest.TestCase):
         )
 
     def test_refresh_grub_config_generates_root_grub_cfg(self) -> None:
+        grub_defaults = self.root / "etc/default/grub"
+        grub_defaults.parent.mkdir(parents=True, exist_ok=True)
+        grub_defaults.write_text("GRUB_CMDLINE_LINUX=\"\"\n", encoding="utf-8")
+
         self.service.refresh_grub_config(self.root)
 
         root_cfg = (self.root / "boot/grub/grub.cfg").read_text(encoding="utf-8")
+        updated_defaults = grub_defaults.read_text(encoding="utf-8")
 
         self.assertEqual(root_cfg, "generated grub config\n")
+        self.assertEqual(updated_defaults, "GRUB_CMDLINE_LINUX=\"rootwait\"\n")
         self.assertEqual(
             self.chroot.calls,
             [
@@ -120,6 +126,17 @@ class BootServiceTests(unittest.TestCase):
                 )
             ],
         )
+
+    def test_refresh_grub_config_preserves_existing_kernel_args_when_adding_rootwait(self) -> None:
+        grub_defaults = self.root / "etc/default/grub"
+        grub_defaults.parent.mkdir(parents=True, exist_ok=True)
+        grub_defaults.write_text("GRUB_CMDLINE_LINUX='console=ttyS0'\n", encoding="utf-8")
+
+        self.service.refresh_grub_config(self.root)
+
+        updated_defaults = grub_defaults.read_text(encoding="utf-8")
+
+        self.assertEqual(updated_defaults, "GRUB_CMDLINE_LINUX='console=ttyS0 rootwait'\n")
 
     def test_find_existing_efi_binary_prefers_grub_binary_over_bootx64_shim(self) -> None:
         bootx64 = self.root / "boot/efi/EFI/BOOT/BOOTX64.EFI"
