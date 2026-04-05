@@ -109,6 +109,7 @@ class PartitionService:
         return efi_mount
 
     def unmount_device(self, device: str) -> None:
+        active_swaps = self._active_swaps()
         result = self.runner.run(
             ["lsblk", "-nrpo", "PATH,TYPE,MOUNTPOINT", device],
             check=False,
@@ -126,7 +127,8 @@ class PartitionService:
         for path, _, mountpoint in reversed(rows):
             if mountpoint:
                 self.runner.run(["umount", "-lf", mountpoint], check=False)
-            self.runner.run(["swapoff", path], check=False)
+            if path in active_swaps:
+                self.runner.run(["swapoff", path], check=False)
         for path, node_type, _ in reversed(rows):
             if node_type == "crypt":
                 self.runner.run(["cryptsetup", "close", Path(path).name], check=False)
@@ -138,3 +140,11 @@ class PartitionService:
         if not mapper_name:
             return
         self.runner.run(["cryptsetup", "close", mapper_name], check=False)
+
+    @staticmethod
+    def _active_swaps() -> set[str]:
+        try:
+            lines = Path("/proc/swaps").read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return set()
+        return {line.split()[0] for line in lines[1:] if line.strip()}

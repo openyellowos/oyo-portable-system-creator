@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from src.services.partition_service import PartitionService
 
@@ -85,7 +86,8 @@ class PartitionServiceTests(unittest.TestCase):
         )
         service = PartitionService(runner, DummyLogger())
 
-        service.unmount_device("/dev/fake")
+        with patch.object(PartitionService, "_active_swaps", return_value={"/dev/fake2"}):
+            service.unmount_device("/dev/fake")
 
         commands = [call["command"] for call in runner.calls]
         self.assertIn(["umount", "-lf", "/media/usb-root"], commands)
@@ -94,6 +96,25 @@ class PartitionServiceTests(unittest.TestCase):
         self.assertIn(["cryptsetup", "close", "oyoport-cryptroot"], commands)
         self.assertEqual(commands[-2], ["partprobe", "/dev/fake"])
         self.assertEqual(commands[-1], ["udevadm", "settle"])
+
+    def test_unmount_device_skips_swapoff_for_non_swap_paths(self) -> None:
+        runner = DummyRunner()
+        runner.outputs[("lsblk", "-nrpo", "PATH,TYPE,MOUNTPOINT", "/dev/fake")] = (
+            0,
+            "/dev/fake disk \n"
+            "/dev/fake1 part /media/usb-efi\n"
+            "/dev/fake2 part \n",
+            "",
+        )
+        service = PartitionService(runner, DummyLogger())
+
+        with patch.object(PartitionService, "_active_swaps", return_value=set()):
+            service.unmount_device("/dev/fake")
+
+        commands = [call["command"] for call in runner.calls]
+        self.assertNotIn(["swapoff", "/dev/fake"], commands)
+        self.assertNotIn(["swapoff", "/dev/fake1"], commands)
+        self.assertNotIn(["swapoff", "/dev/fake2"], commands)
 
 
 if __name__ == "__main__":

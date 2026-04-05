@@ -139,7 +139,6 @@ def build_services(
     if log_signal is not None:
         handler = SignalLogHandler(log_signal)
         logger.user_logger.addHandler(handler)
-        logger.debug_logger.addHandler(handler)
 
     runner = CommandRunner(logger)
     device = DeviceService(runner, logger)
@@ -633,7 +632,6 @@ class MainWindow(QMainWindow):
     def _on_progress(self, percent: int, step: str) -> None:
         self.progress_bar.setFormat("%p%")
         self.progress_bar.setValue(percent)
-        self._append_log(f"[{percent:>3}%] {step}")
         self._set_status(step)
 
     def _on_worker_failed(self, message: str) -> None:

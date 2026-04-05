@@ -49,6 +49,15 @@ class MainWindowDeviceSelectionTests(unittest.TestCase):
         self.assertEqual(self.window.device_combo.currentText(), self.window.t("status.no_devices"))
         self.assertIsNone(self.window._selected_device())
 
+    def test_on_progress_updates_bar_without_appending_duplicate_log(self) -> None:
+        self.window._append_log("existing")
+
+        self.window._on_progress(20, "パーティションを作成")
+
+        self.assertEqual(self.window.progress_bar.value(), 20)
+        self.assertEqual(self.window.status_label.text(), "パーティションを作成")
+        self.assertEqual(self.window.log_view.toPlainText().splitlines(), ["existing"])
+
 
 if __name__ == "__main__":
     unittest.main()
