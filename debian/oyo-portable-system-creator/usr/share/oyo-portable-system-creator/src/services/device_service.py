@@ -53,7 +53,7 @@ class DeviceService:
 
     def list_target_devices(self) -> list[dict]:
         result = self.runner.run(
-            ["lsblk", "--json", "-b", "-o", "NAME,PATH,TYPE,SIZE,RM,TRAN,VENDOR,MODEL"],
+            ["lsblk", "--json", "-b", "-o", "NAME,PATH,TYPE,SIZE,RM,HOTPLUG,TRAN,VENDOR,MODEL"],
             check=True,
         )
         data = json.loads(result.stdout)
@@ -65,7 +65,7 @@ class DeviceService:
             path = item.get("path") or f"/dev/{item['name']}"
             if path == root_disk:
                 continue
-            removable = bool(item.get("rm")) or item.get("tran") == "usb"
+            removable = bool(item.get("rm")) or bool(item.get("hotplug")) or item.get("tran") == "usb"
             if removable:
                 devices.append(item)
         return devices

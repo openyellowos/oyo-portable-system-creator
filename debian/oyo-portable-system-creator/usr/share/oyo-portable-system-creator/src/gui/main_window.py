@@ -181,7 +181,6 @@ class MainWindow(QMainWindow):
 
         self.device_combo = QComboBox()
         self.device_combo.setMinimumWidth(520)
-        self.device_combo.setPlaceholderText(self.t("status.no_devices"))
         self.device_combo.currentIndexChanged.connect(self._on_device_changed)
 
         self.reload_button = QPushButton(self.t("button.reload"))
@@ -580,6 +579,7 @@ class MainWindow(QMainWindow):
         self._update_action_state()
 
     def _on_devices_loaded(self, devices: list[dict]) -> None:
+        previous_target = self._selected_device()
         self.device_combo.clear()
         self.device_paths = []
         self.device_records = {}
@@ -592,8 +592,14 @@ class MainWindow(QMainWindow):
             self.device_records[path] = device
 
         if not devices:
+            self.device_combo.addItem(self.t("status.no_devices"))
+            self.device_combo.setCurrentIndex(0)
             self._set_status(self.t("status.no_devices"))
         else:
+            selected_index = 0
+            if previous_target in self.device_paths:
+                selected_index = self.device_paths.index(previous_target)
+            self.device_combo.setCurrentIndex(selected_index)
             self._set_status("")
         self._update_action_state()
 

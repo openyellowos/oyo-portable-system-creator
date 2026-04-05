@@ -1,4 +1,10 @@
-oyo-portable-system-creator (0.6.0) UNRELEASED; urgency=medium
+oyo-portable-system-creator (0.6.1) UNRELEASED; urgency=medium
+
+  *  USBメモリが刺さっていても「使用可能なUSBメモリはありません」とプルダウンに表示される不具合を修正
+
+ -- toshio <solution92001@gmail.com>  Sun, 05 Apr 2026 15:38:23 +0900
+
+oyo-portable-system-creator (0.6.0) unstable; urgency=medium
 
   * USBメモリでは、gnome-softwareがバックグラウンドで起動しないようにする
 
