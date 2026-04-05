@@ -10,6 +10,7 @@ class OptimizeService:
         self._setup_profile_cache_redirect(target_root)
         self._setup_session_cache_redirect(target_root)
         self._setup_session_autostart(target_root)
+        self._disable_gnome_software_autostart(target_root)
         self._setup_apt_cache_redirect(target_root)
 
     def _setup_journald(self, target_root: Path) -> None:
@@ -165,6 +166,16 @@ class OptimizeService:
             "Terminal=false\n"
             "OnlyShowIn=GNOME;XFCE;KDE;LXQt;MATE;Cinnamon;\n"
             "X-GNOME-Autostart-enabled=true\n",
+            encoding="utf-8",
+        )
+
+    def _disable_gnome_software_autostart(self, target_root: Path) -> None:
+        desktop = target_root / "etc/xdg/autostart/org.gnome.Software.desktop"
+        desktop.parent.mkdir(parents=True, exist_ok=True)
+        desktop.write_text(
+            "[Desktop Entry]\n"
+            "Hidden=true\n"
+            "X-GNOME-Autostart-enabled=false\n",
             encoding="utf-8",
         )
 

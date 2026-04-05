@@ -27,6 +27,9 @@ class OptimizeServiceTests(unittest.TestCase):
         autostart = (
             self.root / "etc/xdg/autostart/oyo-portable-session-cache.desktop"
         ).read_text(encoding="utf-8")
+        gnome_software_autostart = (
+            self.root / "etc/xdg/autostart/org.gnome.Software.desktop"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("Storage=volatile", journald)
         self.assertIn("RuntimeMaxUse=64M", journald)
@@ -51,6 +54,8 @@ class OptimizeServiceTests(unittest.TestCase):
         self.assertIn("$HOME/.config/microsoft-edge-beta", session_script)
         self.assertIn("$HOME/.config/microsoft-edge-dev", session_script)
         self.assertIn("Exec=/usr/local/bin/oyo-portable-session-cache", autostart)
+        self.assertIn("Hidden=true", gnome_software_autostart)
+        self.assertIn("X-GNOME-Autostart-enabled=false", gnome_software_autostart)
 
 
 if __name__ == "__main__":
