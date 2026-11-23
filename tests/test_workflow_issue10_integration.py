@@ -74,7 +74,7 @@ class DummyPartitionService:
         boot_mount.mkdir(parents=True, exist_ok=True)
         return root_mount, "/dev/fake-root", boot_mount
 
-    def mount_efi_partition(self, efi: str, root_mount: Path) -> Path:
+    def mount_efi_partition(self, efi: str, root_mount: Path, **_: object) -> Path:
         self.calls.append(("efi", efi))
         efi_mount = self.work_root / "efi"
         efi_mount.mkdir(parents=True, exist_ok=True)
@@ -228,7 +228,7 @@ class WorkflowTests(unittest.TestCase):
                 with patch("pathlib.Path.read_text", return_value=mountinfo):
                     with patch("src.core.workflow.shutil.rmtree") as rmtree:
                         with patch.object(self.partition_service, "close_encrypted_root") as close_mapper:
-                            with self.assertRaisesRegex(RuntimeError, "Mount cleanup was not confirmed"):
+                            with self.assertRaisesRegex(RuntimeError, "could not confirm workdir mounts are absent"):
                                 self.workflow.run_create(state)
 
         rmtree.assert_not_called()
