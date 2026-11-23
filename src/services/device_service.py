@@ -20,6 +20,7 @@ REQUIRED_COMMANDS = [
     "mount",
     "umount",
     "swapoff",
+    "systemd-inhibit",
     "chroot",
     "rsync",
     "grub-install",

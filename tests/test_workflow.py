@@ -121,6 +121,27 @@ class DummyFirstbootService:
         return None
 
 
+class DummyInhibitor:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    def __enter__(self):
+        self.events.append("inhibit-start")
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.events.append("inhibit-release")
+
+
+class FailingCopyService(DummyCopyService):
+    def __init__(self, failure: BaseException) -> None:
+        super().__init__()
+        self.failure = failure
+
+    def rsync_copy(self, source: str, target_root: Path, mode: str) -> None:
+        raise self.failure
+
+
 class WorkflowTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
@@ -137,6 +158,7 @@ class WorkflowTests(unittest.TestCase):
             DummyOptimizeService(),
             DummyFirstbootService(),
             self.logger,
+            suspend_inhibitor_factory=lambda: DummyInhibitor([]),
         )
 
     def tearDown(self) -> None:
@@ -159,6 +181,54 @@ class WorkflowTests(unittest.TestCase):
         )
         self.assertTrue(any("システムをコピー (1/2)" in msg for msg in self.logger.messages))
         self.assertTrue(any("システムを再同期 (2/2)" in msg for msg in self.logger.messages))
+
+    def test_inhibitor_covers_creation_and_is_released_after_mount_cleanup(self) -> None:
+        events: list[str] = []
+        self.workflow.suspend_inhibitor_factory = lambda: DummyInhibitor(events)
+        cleanup = self.workflow.cleanup
+
+        def record_cleanup(state: ExecutionState) -> None:
+            events.append("cleanup")
+            cleanup(state)
+
+        self.workflow.cleanup = record_cleanup  # type: ignore[method-assign]
+        state = ExecutionState(mode="create", target_device="/dev/sdz")
+
+        self.workflow.run_create(state)
+
+        self.assertEqual(events, ["inhibit-start", "cleanup", "inhibit-release"])
+        self.assertEqual(state.mounted_paths, [])
+
+    def test_inhibitor_is_released_after_workflow_error_and_cleanup(self) -> None:
+        events: list[str] = []
+        self.workflow.suspend_inhibitor_factory = lambda: DummyInhibitor(events)
+        self.workflow.copy_service = FailingCopyService(RuntimeError("copy failed"))
+        cleanup = self.workflow.cleanup
+
+        def record_cleanup(state: ExecutionState) -> None:
+            events.append("cleanup")
+            cleanup(state)
+
+        self.workflow.cleanup = record_cleanup  # type: ignore[method-assign]
+        state = ExecutionState(mode="create", target_device="/dev/sdz")
+
+        with self.assertRaisesRegex(RuntimeError, "copy failed"):
+            self.workflow.run_create(state)
+
+        self.assertEqual(events, ["inhibit-start", "cleanup", "inhibit-release"])
+        self.assertEqual(state.mounted_paths, [])
+
+    def test_inhibitor_is_released_on_cancellation(self) -> None:
+        events: list[str] = []
+        self.workflow.suspend_inhibitor_factory = lambda: DummyInhibitor(events)
+        self.workflow.copy_service = FailingCopyService(KeyboardInterrupt())
+        state = ExecutionState(mode="create", target_device="/dev/sdz")
+
+        with self.assertRaises(KeyboardInterrupt):
+            self.workflow.run_create(state)
+
+        self.assertEqual(events, ["inhibit-start", "inhibit-release"])
+        self.assertEqual(state.mounted_paths, [])
 
 
 if __name__ == "__main__":

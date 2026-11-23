@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from pathlib import Path
 
 from src.core.errors import AppError
 from src.core.state import ExecutionState
 from src.gui.i18n import build_translator
 from src.infra.logger import AppLogger
+from src.infra.suspend_inhibitor import SuspendInhibitor
 from src.services.boot_service import BootService
 from src.services.copy_service import CopyService
 from src.services.device_service import DeviceService
@@ -27,6 +30,7 @@ class Workflow:
         firstboot_service: FirstbootService,
         logger: AppLogger,
         language: str = "ja",
+        suspend_inhibitor_factory: Callable[[], AbstractContextManager[object]] = SuspendInhibitor,
     ) -> None:
         self.device_service = device_service
         self.partition_service = partition_service
@@ -35,6 +39,7 @@ class Workflow:
         self.optimize_service = optimize_service
         self.firstboot_service = firstboot_service
         self.logger = logger
+        self.suspend_inhibitor_factory = suspend_inhibitor_factory
         self.translate = build_translator(language)
 
     def precheck(self, state: ExecutionState) -> None:
@@ -61,76 +66,80 @@ class Workflow:
         return self._run(state, "backup")
 
     def _run(self, state: ExecutionState, mode: str) -> ExecutionState:
-        workdir = Path(tempfile.mkdtemp(prefix="oyo-portable-"))
-        try:
-            self._update_progress(state, 5, self.translate("workflow.precheck.start"))
-            self.precheck(state)
-            self._update_progress(state, 15, self.translate("workflow.precheck.done"))
-            self._update_progress(state, 20, self.translate("workflow.partition.create"))
-            efi, boot, root = self.partition_service.prepare_device(state.target_device or "")
-            self._update_progress(state, 30, self.translate("workflow.fs.mount"))
-            encryption_enabled = bool(state.options.get("encryption_enabled"))
-            mapper_name = str(state.options.get("luks_mapper_name") or "oyoport-cryptroot")
-            root_mount, root_device, boot_mount = self.partition_service.make_filesystems_and_mount(
-                efi,
-                boot,
-                root,
-                workdir,
-                encryption_enabled=encryption_enabled,
-                luks_passphrase=state.options.get("luks_passphrase"),
-                mapper_name=mapper_name,
-            )
-            state.mounted_paths.append(str(root_mount))
-            state.mounted_paths.append(str(boot_mount))
-            state.metadata["root_device"] = root_device
-            if encryption_enabled:
-                state.metadata["luks_uuid"] = self._blkid(root)
-                state.metadata["luks_mapper_name"] = mapper_name
+        # Keep the inhibitor active through cleanup so suspend cannot interrupt unmounts.
+        self._update_progress(state, 5, self.translate("workflow.precheck.start"))
+        self.precheck(state)
+        self._update_progress(state, 15, self.translate("workflow.precheck.done"))
+        with self.suspend_inhibitor_factory():
+            workdir = Path(tempfile.mkdtemp(prefix="oyo-portable-"))
+            try:
+                self._update_progress(state, 20, self.translate("workflow.partition.create"))
+                efi, boot, root = self.partition_service.prepare_device(state.target_device or "")
+                self._update_progress(state, 30, self.translate("workflow.fs.mount"))
+                encryption_enabled = bool(state.options.get("encryption_enabled"))
+                mapper_name = str(state.options.get("luks_mapper_name") or "oyoport-cryptroot")
+                root_mount, root_device, boot_mount = self.partition_service.make_filesystems_and_mount(
+                    efi,
+                    boot,
+                    root,
+                    workdir,
+                    encryption_enabled=encryption_enabled,
+                    luks_passphrase=state.options.get("luks_passphrase"),
+                    mapper_name=mapper_name,
+                )
+                state.mounted_paths.append(str(root_mount))
+                state.mounted_paths.append(str(boot_mount))
+                state.metadata["root_device"] = root_device
+                if encryption_enabled:
+                    state.metadata["luks_uuid"] = self._blkid(root)
+                    state.metadata["luks_mapper_name"] = mapper_name
 
-            self._update_progress(state, 45, self.translate("workflow.copy.first"))
-            source_path = str(state.metadata.get("source_path") or self.copy_service.resolve_source(mode, state.source_device))
-            self.copy_service.rsync_copy(source_path, root_mount, mode)
-            self._update_progress(state, 55, self.translate("workflow.copy.second"))
-            self.copy_service.rsync_copy(source_path, root_mount, mode)
+                self._update_progress(state, 45, self.translate("workflow.copy.first"))
+                source_path = str(state.metadata.get("source_path") or self.copy_service.resolve_source(mode, state.source_device))
+                self.copy_service.rsync_copy(source_path, root_mount, mode)
+                self._update_progress(state, 55, self.translate("workflow.copy.second"))
+                self.copy_service.rsync_copy(source_path, root_mount, mode)
 
-            efi_mount = self.partition_service.mount_efi_partition(efi, root_mount)
-            state.mounted_paths.append(str(efi_mount))
+                efi_mount = self.partition_service.mount_efi_partition(efi, root_mount)
+                state.mounted_paths.append(str(efi_mount))
 
-            self._update_progress(state, 60, self.translate("workflow.fstab"))
-            root_uuid = self._blkid(str(state.metadata.get("root_device") or root))
-            boot_uuid = self._blkid(boot)
-            efi_uuid = self._blkid(efi)
-            self.copy_service.write_fstab(
-                root_mount,
-                root_uuid,
-                boot_uuid,
-                efi_uuid,
-                encryption_enabled=encryption_enabled,
-                mapper_name=mapper_name,
-                luks_uuid=state.metadata.get("luks_uuid"),
-            )
+                self._update_progress(state, 60, self.translate("workflow.fstab"))
+                root_uuid = self._blkid(str(state.metadata.get("root_device") or root))
+                boot_uuid = self._blkid(boot)
+                efi_uuid = self._blkid(efi)
+                self.copy_service.write_fstab(
+                    root_mount,
+                    root_uuid,
+                    boot_uuid,
+                    efi_uuid,
+                    encryption_enabled=encryption_enabled,
+                    mapper_name=mapper_name,
+                    luks_uuid=state.metadata.get("luks_uuid"),
+                )
 
-            self._update_progress(state, 70, self.translate("workflow.grub.install"))
-            self.boot_service.install_grub(
-                root_mount,
-                state.target_device or "",
-                boot_uuid,
-            )
-            self._update_progress(state, 78, self.translate("workflow.initramfs"))
-            self.boot_service.update_initramfs(root_mount)
-            self._update_progress(state, 82, self.translate("workflow.grub.config"))
-            self.boot_service.refresh_grub_config(root_mount)
+                self._update_progress(state, 70, self.translate("workflow.grub.install"))
+                self.boot_service.install_grub(
+                    root_mount,
+                    state.target_device or "",
+                    boot_uuid,
+                )
+                self._update_progress(state, 78, self.translate("workflow.initramfs"))
+                self.boot_service.update_initramfs(root_mount)
+                self._update_progress(state, 82, self.translate("workflow.grub.config"))
+                self.boot_service.refresh_grub_config(root_mount)
 
-            self._update_progress(state, 85, self.translate("workflow.optimize"))
-            self.optimize_service.apply(root_mount)
-            self._update_progress(state, 92, self.translate("workflow.firstboot"))
-            self.firstboot_service.install(root_mount)
+                self._update_progress(state, 85, self.translate("workflow.optimize"))
+                self.optimize_service.apply(root_mount)
+                self._update_progress(state, 92, self.translate("workflow.firstboot"))
+                self.firstboot_service.install(root_mount)
 
-            self._update_progress(state, 100, self.translate("workflow.done"))
-            return state
-        finally:
-            self.cleanup(state)
-            shutil.rmtree(workdir, ignore_errors=True)
+                self._update_progress(state, 100, self.translate("workflow.done"))
+                return state
+            finally:
+                try:
+                    self.cleanup(state)
+                finally:
+                    shutil.rmtree(workdir, ignore_errors=True)
 
     def _update_progress(self, state: ExecutionState, percent: int, step: str) -> None:
         state.set_progress(percent, step)
