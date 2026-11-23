@@ -308,7 +308,12 @@ class WorkflowTests(unittest.TestCase):
                             self.workflow.run_create(state)
 
         expected_mount = str(canonical_root)
-        self.assertEqual(state.mounted_paths, [expected_mount])
+        # On uncertain cleanup, retain every tracked attempt for a future
+        # reconciliation rather than dropping paths that appeared absent.
+        self.assertEqual(
+            state.mounted_paths,
+            [expected_mount, expected_mount + "/boot", expected_mount + "/boot/efi"],
+        )
         self.assertEqual(state.metadata["mount_sources"][expected_mount], "/dev/fake-root")
         self.assertIn({"command": ["umount", expected_mount]}, runner.calls)
         remove_tree.assert_not_called()
