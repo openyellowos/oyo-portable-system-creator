@@ -24,6 +24,9 @@ def _process_start_time(pid: int) -> int | None:
     # begin with field 3 (state), so starttime (field 22) is item 19.
     fields = stat[stat.rfind(")") + 2 :].split()
     try:
+        state = fields[0]
+        if state in {"Z", "X", "x"}:
+            return None
         return int(fields[19])
     except (IndexError, ValueError):
         return None

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+import os
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from src.core.errors import AppError
@@ -50,6 +53,8 @@ class PartitionService:
         encryption_enabled: bool = False,
         luks_passphrase: str | None = None,
         mapper_name: str = "oyoport-cryptroot",
+        on_mount_attempt: Callable[[Path, str], None] | None = None,
+        on_mapper_open_attempt: Callable[[str, str], None] | None = None,
     ) -> tuple[Path, str, Path]:
         root_mount = workdir / "root"
         boot_mount = root_mount / "boot"
@@ -76,6 +81,14 @@ class PartitionService:
                     input_text=passphrase,
                     mask_values=[passphrase],
                 )
+                # Never adopt an existing mapping. Cleanup independently verifies
+                # the backing device to cover the race between this check and open.
+                if self.mapper_backing_device(mapper_name) is not None:
+                    raise RuntimeError(f"mapper {mapper_name} is already active")
+                # Register immediately before open to cover an interruption after
+                # activation but before run() returns.
+                if on_mapper_open_attempt is not None:
+                    on_mapper_open_attempt(mapper_name, root_part)
                 self.runner.run(
                     ["cryptsetup", "open", "--key-file", "-", root_part, mapper_name],
                     input_text=passphrase,
@@ -88,8 +101,14 @@ class PartitionService:
         except Exception as exc:
             raise AppError.translated("E302", "error.mkfs_failed", reason=str(exc)) from exc
         try:
+            # Register conservatively before each mount attempt so cleanup also
+            # covers a command interrupted after the kernel mounted the device.
+            if on_mount_attempt is not None:
+                on_mount_attempt(root_mount, root_device)
             self.runner.run(["mount", root_device, str(root_mount)])
             boot_mount.mkdir(parents=True, exist_ok=True)
+            if on_mount_attempt is not None:
+                on_mount_attempt(boot_mount, boot_part)
             self.runner.run(["mount", boot_part, str(boot_mount)])
         except AppError:
             raise
@@ -97,10 +116,18 @@ class PartitionService:
             raise AppError.translated("E303", "error.mount_failed", reason=str(exc)) from exc
         return root_mount, root_device, boot_mount
 
-    def mount_efi_partition(self, efi_part: str, root_mount: Path) -> Path:
+    def mount_efi_partition(
+        self,
+        efi_part: str,
+        root_mount: Path,
+        *,
+        on_mount_attempt: Callable[[Path, str], None] | None = None,
+    ) -> Path:
         efi_mount = root_mount / "boot/efi"
         efi_mount.mkdir(parents=True, exist_ok=True)
         try:
+            if on_mount_attempt is not None:
+                on_mount_attempt(efi_mount, efi_part)
             self.runner.run(["mount", efi_part, str(efi_mount)])
         except AppError:
             raise
@@ -111,35 +138,122 @@ class PartitionService:
     def unmount_device(self, device: str) -> None:
         active_swaps = self._active_swaps()
         result = self.runner.run(
-            ["lsblk", "-nrpo", "PATH,TYPE,MOUNTPOINT", device],
+            ["lsblk", "--json", "--paths", "--output", "PATH,TYPE,MOUNTPOINTS", device],
             check=False,
         )
-        rows: list[tuple[str, str, str]] = []
-        for line in result.stdout.splitlines():
-            if not line.strip():
-                continue
-            parts = line.split(None, 2)
-            path = parts[0]
-            node_type = parts[1] if len(parts) > 1 else ""
-            mountpoint = parts[2] if len(parts) > 2 else ""
-            rows.append((path, node_type, mountpoint))
+        if result.returncode != 0:
+            raise RuntimeError(f"could not inspect target device {device}")
+        try:
+            inventory = json.loads(result.stdout)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"could not parse target device inventory for {device}") from exc
 
-        for path, _, mountpoint in reversed(rows):
-            if mountpoint:
-                self.runner.run(["umount", "-lf", mountpoint], check=False)
-            if path in active_swaps:
-                self.runner.run(["swapoff", path], check=False)
+        rows: list[tuple[str, str, list[str]]] = []
+
+        def visit(nodes: object) -> None:
+            if not isinstance(nodes, list):
+                raise RuntimeError(f"invalid target device inventory for {device}")
+            for node in nodes:
+                if not isinstance(node, dict) or not isinstance(node.get("path"), str):
+                    raise RuntimeError(f"invalid target device inventory for {device}")
+                node_type = node.get("type") or ""
+                mountpoints = node.get("mountpoints")
+                if mountpoints is None:
+                    mountpoints = []
+                if isinstance(mountpoints, str):
+                    mountpoints = [mountpoints]
+                if not isinstance(mountpoints, list) or any(
+                    mountpoint is not None and not isinstance(mountpoint, str)
+                    for mountpoint in mountpoints
+                ):
+                    raise RuntimeError(f"invalid target device inventory for {device}")
+                rows.append((node["path"], node_type, [m for m in mountpoints if m]))
+                children = node.get("children")
+                if children is not None:
+                    visit(children)
+
+        if not isinstance(inventory, dict) or "blockdevices" not in inventory:
+            raise RuntimeError(f"invalid target device inventory for {device}")
+        visit(inventory["blockdevices"])
+
+        for path, node_type, mountpoints in reversed(rows):
+            is_swap = path in active_swaps or node_type == "swap" or "[SWAP]" in mountpoints
+            if is_swap:
+                self._run_release(["swapoff", path])
+            for mountpoint in reversed(mountpoints):
+                # lsblk uses this marker for swap devices, not as a mount path.
+                if mountpoint == "[SWAP]":
+                    continue
+                canonical_mountpoint = self.canonical_mountpoint(mountpoint)
+                self._run_release(["umount", canonical_mountpoint])
+                if self.mount_source_for(canonical_mountpoint) is not None:
+                    raise RuntimeError(f"mount remains active after unmount: {mountpoint}")
         for path, node_type, _ in reversed(rows):
             if node_type == "crypt":
-                self.runner.run(["cryptsetup", "close", Path(path).name], check=False)
+                self._run_release(["cryptsetup", "close", Path(path).name])
 
         self.runner.run(["partprobe", device], check=False)
         self.runner.run(["udevadm", "settle"], check=False)
 
+    def _run_release(self, command: list[str]) -> None:
+        result = self.runner.run(command, check=False)
+        if result.returncode != 0:
+            raise RuntimeError(f"resource release failed: {' '.join(command)} (exit {result.returncode})")
+
+    @staticmethod
+    def canonical_mountpoint(mountpoint: str | os.PathLike[str]) -> str:
+        """Resolve aliases so mountinfo, tracking, and unmount use one path."""
+        return os.path.realpath(os.path.normpath(os.fspath(mountpoint)))
+
+    @staticmethod
+    def mount_source_for(mountpoint: str) -> str | None:
+        """Return a mount's source from Linux mountinfo; None means confirmed absent."""
+        target = PartitionService.canonical_mountpoint(mountpoint)
+        found_source: str | None = None
+        for line in Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines():
+            before, separator, after = line.partition(" - ")
+            if not separator:
+                raise RuntimeError("malformed /proc/self/mountinfo entry")
+            fields = before.split()
+            tail = after.split()
+            if len(fields) < 5 or len(tail) < 2:
+                raise RuntimeError("malformed /proc/self/mountinfo entry")
+            decoded_mountpoint = PartitionService._unescape_mountinfo(fields[4])
+            if PartitionService.canonical_mountpoint(decoded_mountpoint) == target:
+                # Mountinfo is ordered by mount ID; the last entry is the visible
+                # topmost mount when a mountpoint has been over-mounted.
+                found_source = PartitionService._unescape_mountinfo(tail[1])
+        return found_source
+
+    @staticmethod
+    def _unescape_mountinfo(value: str) -> str:
+        import re
+        return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), value)
+
+    def mapper_backing_device(self, mapper_name: str) -> str | None:
+        result = self.runner.run(["cryptsetup", "status", mapper_name], check=False)
+        if result.returncode != 0:
+            # cryptsetup's status alone can fail for both "inactive" and an
+            # inspection error. A live mapper node makes that uncertainty unsafe.
+            if (Path("/dev/mapper") / mapper_name).exists():
+                raise RuntimeError(f"cannot verify backing device for mapper {mapper_name}")
+            return None
+        for line in result.stdout.splitlines():
+            key, sep, value = line.partition(":")
+            if sep and key.strip().lower() == "device":
+                return value.strip()
+        raise RuntimeError(f"cannot determine backing device for mapper {mapper_name}")
+
     def close_encrypted_root(self, mapper_name: str | None) -> None:
         if not mapper_name:
             return
-        self.runner.run(["cryptsetup", "close", mapper_name], check=False)
+        result = self.runner.run(["cryptsetup", "close", mapper_name], check=False)
+        if result.returncode != 0:
+            raise AppError.translated(
+                "E999",
+                "error.command_failed",
+                command=f"cryptsetup close {mapper_name}",
+            )
 
     @staticmethod
     def _active_swaps() -> set[str]:
