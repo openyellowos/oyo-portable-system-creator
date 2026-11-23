@@ -136,10 +136,8 @@ class Workflow:
                 self._update_progress(state, 100, self.translate("workflow.done"))
                 return state
             finally:
-                try:
-                    self.cleanup(state)
-                finally:
-                    shutil.rmtree(workdir, ignore_errors=True)
+                self.cleanup(state)
+                shutil.rmtree(workdir, ignore_errors=True)
 
     def _update_progress(self, state: ExecutionState, percent: int, step: str) -> None:
         state.set_progress(percent, step)

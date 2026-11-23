@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from src.core.state import ExecutionState
 from src.core.workflow import Workflow
@@ -217,6 +218,31 @@ class WorkflowTests(unittest.TestCase):
 
         self.assertEqual(events, ["inhibit-start", "cleanup", "inhibit-release"])
         self.assertEqual(state.mounted_paths, [])
+
+    def test_cleanup_failure_preserves_workdir_and_releases_inhibitor(self) -> None:
+        events: list[str] = []
+        self.workflow.suspend_inhibitor_factory = lambda: DummyInhibitor(events)
+        workdir = self.work_root / "workflow-workdir"
+        workdir.mkdir()
+        marker = workdir / "marker"
+        marker.write_text("preserve me")
+
+        def fail_cleanup(state: ExecutionState) -> None:
+            events.append("cleanup")
+            raise RuntimeError("cleanup failed")
+
+        self.workflow.cleanup = fail_cleanup  # type: ignore[method-assign]
+        state = ExecutionState(mode="create", target_device="/dev/sdz")
+
+        with patch("src.core.workflow.tempfile.mkdtemp", return_value=str(workdir)):
+            with patch("src.core.workflow.shutil.rmtree") as rmtree:
+                with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
+                    self.workflow.run_create(state)
+
+        rmtree.assert_not_called()
+        self.assertTrue(workdir.is_dir())
+        self.assertEqual(marker.read_text(), "preserve me")
+        self.assertEqual(events, ["inhibit-start", "cleanup", "inhibit-release"])
 
     def test_inhibitor_is_released_on_cancellation(self) -> None:
         events: list[str] = []
