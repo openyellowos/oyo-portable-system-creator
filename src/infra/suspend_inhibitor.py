@@ -62,7 +62,9 @@ class SuspendInhibitor:
 
         command = [
             executable,
-            "--what=sleep",
+            # sleep blocks explicit suspend/hibernate requests; idle separately
+            # blocks logind's automatic IdleAction handling.
+            "--what=sleep:idle",
             "--mode=block",
             "--no-ask-password",
             "--who=oyo-portable-system-creator",

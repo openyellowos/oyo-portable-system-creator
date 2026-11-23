@@ -15,6 +15,8 @@ REQUIRED_COMMANDS = [
     "blkid",
     "parted",
     "partprobe",
+    "dd",
+    "udevadm",
     "mkfs.vfat",
     "mkfs.ext4",
     "mount",

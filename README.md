@@ -20,6 +20,12 @@ src/bin/oyo-portable-system-creator
 - ext4 root
 - GPT + EFI/FAT32 + root/ext4
 
+## USB 作成中のサスペンド抑止
+
+USB 作成処理では systemd-logind の `sleep` / `idle` inhibitor を取得し、処理とマウント解除などの後始末が終わった後に解放します。これは logind を経由する通常のサスペンド要求と logind 自身の自動アイドル処理を抑止するためのもので、画面ロックやディスプレイ消灯を一律に無効化するものではありません。logind の `IdleAction=lock` は idle inhibitor の影響を受ける場合があります。
+
+蓋スイッチは別の logind 設定・低レベル inhibitor・デスクトップ環境の電源管理に依存します。このアプリは `handle-lid-switch` inhibitor を取得しないため、蓋を閉じた際のサスペンドを保証して防ぐことはできません。管理者による inhibitor の上書き、logind を迂回するサスペンド、ファームウェアやハードウェアによる電源断・スリープも抑止対象外です。
+
 ## 非対応
 - 一般 Debian/Ubuntu
 - 復元/修復
