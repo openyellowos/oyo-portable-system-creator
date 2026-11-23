@@ -160,11 +160,11 @@ class DummyBootService:
         self.calls.append(("install_grub", root_mount))
         return None
 
-    def update_initramfs(self, root_mount: Path) -> None:
+    def update_initramfs(self, root_mount: Path, **_: object) -> None:
         self.calls.append(("update_initramfs", root_mount))
         return None
 
-    def refresh_grub_config(self, root_mount: Path) -> None:
+    def refresh_grub_config(self, root_mount: Path, **_: object) -> None:
         self.calls.append(("refresh_grub_config", root_mount))
         return None
 
