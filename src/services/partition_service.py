@@ -176,6 +176,10 @@ class PartitionService:
             raise RuntimeError(f"invalid target device inventory for {device}")
         visit(inventory["blockdevices"])
 
+        # Disable swap across the whole device before filesystem unmounts.
+        # Mountpoints must be released globally child-before-parent: lsblk's
+        # partition enumeration order is not a safe proxy for mount nesting.
+        mountpoints_to_release: list[str] = []
         for path, node_type, mountpoints in reversed(rows):
             is_swap = path in active_swaps or node_type == "swap" or "[SWAP]" in mountpoints
             if is_swap:
@@ -184,10 +188,15 @@ class PartitionService:
                 # lsblk uses this marker for swap devices, not as a mount path.
                 if mountpoint == "[SWAP]":
                     continue
-                canonical_mountpoint = self.canonical_mountpoint(mountpoint)
-                self._run_release(["umount", canonical_mountpoint])
-                if self.mount_source_for(canonical_mountpoint) is not None:
-                    raise RuntimeError(f"mount remains active after unmount: {mountpoint}")
+                mountpoints_to_release.append(self.canonical_mountpoint(mountpoint))
+
+        for mountpoint in sorted(
+            mountpoints_to_release,
+            key=lambda path: (-len(Path(path).parts), path),
+        ):
+            self._run_release(["umount", mountpoint])
+            if self.mount_source_for(mountpoint) is not None:
+                raise RuntimeError(f"mount remains active after unmount: {mountpoint}")
         for path, node_type, _ in reversed(rows):
             if node_type == "crypt":
                 self._run_release(["cryptsetup", "close", Path(path).name])

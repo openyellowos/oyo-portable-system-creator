@@ -177,6 +177,64 @@ class PartitionServiceTests(unittest.TestCase):
         for mountpoint in ("/media/user/My USB", "/mnt/backup"):
             self.assertLess(commands.index(["umount", mountpoint]), dd_index)
 
+    def test_prepare_device_unmounts_nested_mounts_globally_child_before_parent(self) -> None:
+        runner = DummyRunner()
+        # Deliberately enumerate EFI, root, boot; that order must not determine
+        # release order for the nested target layout.
+        runner.outputs[self.lsblk_command()] = (
+            0,
+            self.inventory({
+                "path": "/dev/fake", "type": "disk", "mountpoints": None,
+                "children": [
+                    {"path": "/dev/efi", "type": "part", "mountpoints": ["/old/root/boot/efi"]},
+                    {"path": "/dev/root", "type": "part", "mountpoints": ["/old/root"]},
+                    {"path": "/dev/boot", "type": "part", "mountpoints": ["/old/root/boot"]},
+                ],
+            }),
+            "",
+        )
+        service = PartitionService(runner, DummyLogger())
+
+        with patch.object(PartitionService, "_active_swaps", return_value=set()), \
+             patch.object(PartitionService, "mount_source_for", return_value=None):
+            service.prepare_device("/dev/fake")
+
+        commands = [call["command"] for call in runner.calls]
+        unmounts = [command[-1] for command in commands if command[0] == "umount"]
+        self.assertEqual(
+            unmounts,
+            ["/old/root/boot/efi", "/old/root/boot", "/old/root"],
+        )
+        dd_index = commands.index(["dd", "if=/dev/zero", "of=/dev/fake", "bs=1M", "count=16", "conv=fsync"])
+        self.assertTrue(all(commands.index(["umount", path]) < dd_index for path in unmounts))
+
+    def test_prepare_device_fails_closed_when_nested_child_unmount_fails(self) -> None:
+        runner = DummyRunner()
+        runner.outputs[self.lsblk_command()] = (
+            0,
+            self.inventory({
+                "path": "/dev/fake", "type": "disk", "mountpoints": None,
+                "children": [
+                    {"path": "/dev/efi", "type": "part", "mountpoints": ["/old/root/boot/efi"]},
+                    {"path": "/dev/root", "type": "part", "mountpoints": ["/old/root"]},
+                    {"path": "/dev/boot", "type": "part", "mountpoints": ["/old/root/boot"]},
+                ],
+            }),
+            "",
+        )
+        runner.outputs[("umount", "/old/root/boot/efi")] = (1, "", "busy")
+        service = PartitionService(runner, DummyLogger())
+
+        with patch.object(PartitionService, "_active_swaps", return_value=set()):
+            with self.assertRaises(AppError):
+                service.prepare_device("/dev/fake")
+
+        commands = [call["command"] for call in runner.calls]
+        self.assertIn(["umount", "/old/root/boot/efi"], commands)
+        self.assertNotIn(["umount", "/old/root/boot"], commands)
+        self.assertNotIn(["umount", "/old/root"], commands)
+        self.assertFalse(any(command[0] in {"dd", "parted", "partprobe"} for command in commands))
+
     def test_prepare_device_releases_lsblk_swap_marker_even_without_proc_entry(self) -> None:
         runner = DummyRunner()
         runner.outputs[self.lsblk_command()] = (
