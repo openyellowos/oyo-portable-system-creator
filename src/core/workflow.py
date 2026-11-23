@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import tempfile
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from pathlib import Path
 
 from src.core.errors import AppError
 from src.core.state import ExecutionState
 from src.gui.i18n import build_translator
 from src.infra.logger import AppLogger
+from src.infra.suspend_inhibitor import SuspendInhibitor
 from src.services.boot_service import BootService
 from src.services.copy_service import CopyService
 from src.services.device_service import DeviceService
@@ -28,6 +32,7 @@ class Workflow:
         firstboot_service: FirstbootService,
         logger: AppLogger,
         language: str = "ja",
+        suspend_inhibitor_factory: Callable[[], AbstractContextManager[object]] = SuspendInhibitor,
     ) -> None:
         self.device_service = device_service
         self.partition_service = partition_service
@@ -36,6 +41,7 @@ class Workflow:
         self.optimize_service = optimize_service
         self.firstboot_service = firstboot_service
         self.logger = logger
+        self.suspend_inhibitor_factory = suspend_inhibitor_factory
         self.translate = build_translator(language)
 
     def precheck(self, state: ExecutionState) -> None:
@@ -62,100 +68,94 @@ class Workflow:
         return self._run(state, "backup")
 
     def _run(self, state: ExecutionState, mode: str) -> ExecutionState:
-        workdir = Path(tempfile.mkdtemp(prefix="oyo-portable-"))
-        try:
-            self._update_progress(state, 5, self.translate("workflow.precheck.start"))
-            self.precheck(state)
-            self._update_progress(state, 15, self.translate("workflow.precheck.done"))
-            self._update_progress(state, 20, self.translate("workflow.partition.create"))
-            efi, boot, root = self.partition_service.prepare_device(state.target_device or "")
-            self._update_progress(state, 30, self.translate("workflow.fs.mount"))
-            encryption_enabled = bool(state.options.get("encryption_enabled"))
-            mapper_name = str(state.options.get("luks_mapper_name") or "oyoport-cryptroot")
+        # Keep the inhibitor active through cleanup so suspend cannot interrupt unmounts.
+        self._update_progress(state, 5, self.translate("workflow.precheck.start"))
+        self.precheck(state)
+        self._update_progress(state, 15, self.translate("workflow.precheck.done"))
+        with self.suspend_inhibitor_factory():
+            workdir = Path(tempfile.mkdtemp(prefix="oyo-portable-"))
+            state.metadata["_workflow_workdir"] = str(workdir)
+            try:
+                self._update_progress(state, 20, self.translate("workflow.partition.create"))
+                efi, boot, root = self.partition_service.prepare_device(state.target_device or "")
+                self._update_progress(state, 30, self.translate("workflow.fs.mount"))
+                encryption_enabled = bool(state.options.get("encryption_enabled"))
+                mapper_name = str(state.options.get("luks_mapper_name") or "oyoport-cryptroot")
+                def register_mount_attempt(path: Path, source: str | None = None) -> None:
+                    mount_path = PartitionService.canonical_mountpoint(path)
+                    if mount_path not in state.mounted_paths:
+                        state.mounted_paths.append(mount_path)
+                    if source is not None:
+                        sources = state.metadata.setdefault("mount_sources", {})
+                        sources[mount_path] = source
 
-            def register_mount_attempt(path: Path, source: str | None = None) -> None:
-                mount_path = PartitionService.canonical_mountpoint(path)
-                if mount_path not in state.mounted_paths:
-                    state.mounted_paths.append(mount_path)
-                if source is not None:
-                    sources = state.metadata.setdefault("mount_sources", {})
-                    sources[mount_path] = source
+                def register_mapper_open_attempt(name: str, backing_device: str) -> None:
+                    state.metadata["luks_mapper_name"] = name
+                    state.metadata["luks_mapper_backing_device"] = backing_device
 
-            def register_mapper_open_attempt(name: str, backing_device: str) -> None:
-                state.metadata["luks_mapper_name"] = name
-                state.metadata["luks_mapper_backing_device"] = backing_device
+                root_mount, root_device, boot_mount = self.partition_service.make_filesystems_and_mount(
+                    efi,
+                    boot,
+                    root,
+                    workdir,
+                    encryption_enabled=encryption_enabled,
+                    luks_passphrase=state.options.get("luks_passphrase"),
+                    mapper_name=mapper_name,
+                    on_mount_attempt=register_mount_attempt,
+                    on_mapper_open_attempt=register_mapper_open_attempt,
+                )
+                register_mount_attempt(root_mount, root_device)
+                register_mount_attempt(boot_mount, boot)
+                state.metadata["root_device"] = root_device
+                if encryption_enabled:
+                    state.metadata["luks_uuid"] = self._blkid(root)
+                    state.metadata["luks_mapper_name"] = mapper_name
 
-            root_mount, root_device, boot_mount = self.partition_service.make_filesystems_and_mount(
-                efi,
-                boot,
-                root,
-                workdir,
-                encryption_enabled=encryption_enabled,
-                luks_passphrase=state.options.get("luks_passphrase"),
-                mapper_name=mapper_name,
-                on_mount_attempt=register_mount_attempt,
-                on_mapper_open_attempt=register_mapper_open_attempt,
-            )
-            # Retain compatibility with service implementations that do not
-            # report individual attempts; the real service registers before
-            # each command to cover interruption windows.
-            register_mount_attempt(root_mount, root_device)
-            register_mount_attempt(boot_mount, boot)
-            state.metadata["root_device"] = root_device
-            if encryption_enabled:
-                state.metadata["luks_uuid"] = self._blkid(root)
-                state.metadata["luks_mapper_name"] = mapper_name
+                self._update_progress(state, 45, self.translate("workflow.copy.first"))
+                source_path = str(state.metadata.get("source_path") or self.copy_service.resolve_source(mode, state.source_device))
+                self.copy_service.rsync_copy(source_path, root_mount, mode)
+                self._update_progress(state, 55, self.translate("workflow.copy.second"))
+                self.copy_service.rsync_copy(source_path, root_mount, mode)
 
-            self._update_progress(state, 45, self.translate("workflow.copy.first"))
-            source_path = str(state.metadata.get("source_path") or self.copy_service.resolve_source(mode, state.source_device))
-            self.copy_service.rsync_copy(source_path, root_mount, mode)
-            self._update_progress(state, 55, self.translate("workflow.copy.second"))
-            self.copy_service.rsync_copy(source_path, root_mount, mode)
+                efi_mount = self.partition_service.mount_efi_partition(efi, root_mount, on_mount_attempt=register_mount_attempt)
+                register_mount_attempt(efi_mount, efi)
 
-            efi_mount = self.partition_service.mount_efi_partition(
-                efi,
-                root_mount,
-                on_mount_attempt=register_mount_attempt,
-            )
-            register_mount_attempt(efi_mount, efi)
+                self._update_progress(state, 60, self.translate("workflow.fstab"))
+                root_uuid = self._blkid(str(state.metadata.get("root_device") or root))
+                boot_uuid = self._blkid(boot)
+                efi_uuid = self._blkid(efi)
+                self.copy_service.write_fstab(
+                    root_mount,
+                    root_uuid,
+                    boot_uuid,
+                    efi_uuid,
+                    encryption_enabled=encryption_enabled,
+                    mapper_name=mapper_name,
+                    luks_uuid=state.metadata.get("luks_uuid"),
+                )
 
-            self._update_progress(state, 60, self.translate("workflow.fstab"))
-            root_uuid = self._blkid(str(state.metadata.get("root_device") or root))
-            boot_uuid = self._blkid(boot)
-            efi_uuid = self._blkid(efi)
-            self.copy_service.write_fstab(
-                root_mount,
-                root_uuid,
-                boot_uuid,
-                efi_uuid,
-                encryption_enabled=encryption_enabled,
-                mapper_name=mapper_name,
-                luks_uuid=state.metadata.get("luks_uuid"),
-            )
+                self._update_progress(state, 70, self.translate("workflow.grub.install"))
+                self.boot_service.install_grub(
+                    root_mount,
+                    state.target_device or "",
+                    boot_uuid,
+                )
+                self._update_progress(state, 78, self.translate("workflow.initramfs"))
+                self.boot_service.update_initramfs(root_mount)
+                self._update_progress(state, 82, self.translate("workflow.grub.config"))
+                self.boot_service.refresh_grub_config(root_mount)
 
-            self._update_progress(state, 70, self.translate("workflow.grub.install"))
-            self.boot_service.install_grub(
-                root_mount,
-                state.target_device or "",
-                boot_uuid,
-            )
-            self._update_progress(state, 78, self.translate("workflow.initramfs"))
-            self.boot_service.update_initramfs(root_mount)
-            self._update_progress(state, 82, self.translate("workflow.grub.config"))
-            self.boot_service.refresh_grub_config(root_mount)
+                self._update_progress(state, 85, self.translate("workflow.optimize"))
+                self.optimize_service.apply(root_mount)
+                self._update_progress(state, 92, self.translate("workflow.firstboot"))
+                self.firstboot_service.install(root_mount)
 
-            self._update_progress(state, 85, self.translate("workflow.optimize"))
-            self.optimize_service.apply(root_mount)
-            self._update_progress(state, 92, self.translate("workflow.firstboot"))
-            self.firstboot_service.install(root_mount)
-
-            self._update_progress(state, 100, self.translate("workflow.done"))
-            return state
-        finally:
-            # Removing this directory can destroy the only copy of data under
-            # a still-mounted filesystem. Preserve it whenever cleanup fails.
-            self.cleanup(state)
-            shutil.rmtree(workdir)
+                self._update_progress(state, 100, self.translate("workflow.done"))
+                return state
+            finally:
+                self.cleanup(state)
+                self._assert_no_mounts_beneath(workdir)
+                shutil.rmtree(workdir, ignore_errors=True)
 
     def _update_progress(self, state: ExecutionState, percent: int, step: str) -> None:
         state.set_progress(percent, step)
@@ -183,25 +183,28 @@ class Workflow:
                         failures.append(RuntimeError(f"mount identity mismatch or unknown for {path}"))
                         continue
                 result = self.device_service.runner.run(["umount", canonical_path], check=False)
-                returncode = getattr(result, "returncode", 0)
+                returncode = getattr(result, "returncode", None)
+                if returncode != 0:
+                    failures.append(RuntimeError(f"umount failed for {path} (exit status {returncode})"))
                 if mount_state_reader is not None:
                     remaining_source = mount_state_reader(canonical_path)
                     if remaining_source is None:
-                        state.mounted_paths.remove(path)
-                    else:
-                        reason = (
-                            f"umount failed for {path} (exit status {returncode})"
-                            if returncode != 0
-                            else f"mount remains active after umount: {path}"
-                        )
-                        failures.append(RuntimeError(reason))
-                elif returncode != 0:
-                    failures.append(RuntimeError(f"umount failed for {path} (exit status {returncode})"))
-                else:
+                        if returncode == 0:
+                            state.mounted_paths.remove(path)
+                    elif returncode == 0:
+                        failures.append(RuntimeError(f"mount remains active after umount: {path}"))
+                elif returncode == 0:
                     state.mounted_paths.remove(path)
             except BaseException as exc:
                 # Unknown mount state is unsafe: retain the workdir and mapper.
                 failures.append(exc)
+
+        workdir = state.metadata.get("_workflow_workdir")
+        if workdir:
+            try:
+                self._assert_no_mounts_beneath(Path(str(workdir)))
+            except Exception as exc:
+                failures.append(RuntimeError(f"could not confirm workdir mounts are absent: {exc}"))
 
         mapper_name = state.metadata.get("luks_mapper_name")
         if not failures and mapper_name:
@@ -225,3 +228,68 @@ class Workflow:
 
         if failures:
             raise failures[0]
+
+    @staticmethod
+    def _mountpoints_in_process_namespace() -> set[str]:
+        """Read mountpoints from Linux mountinfo, rejecting incomplete snapshots."""
+        mountinfo = Path("/proc/self/mountinfo").read_text(encoding="utf-8")
+        if not mountinfo:
+            raise RuntimeError("/proc/self/mountinfo is empty")
+
+        escapes = {"040": " ", "011": "\t", "012": "\n", "134": "\\"}
+        mountpoints: set[str] = set()
+        lines = mountinfo.split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()
+        if not lines or any(not line for line in lines):
+            raise RuntimeError("malformed /proc/self/mountinfo snapshot")
+
+        for line in lines:
+            # mountinfo escapes ASCII whitespace in paths; tokenize only on
+            # ASCII spaces so valid Unicode whitespace in filenames is kept.
+            fields = line.split(" ")
+            if "" in fields:
+                raise RuntimeError("malformed /proc/self/mountinfo entry")
+            try:
+                separator = fields.index("-", 6)
+            except ValueError as exc:
+                raise RuntimeError("malformed /proc/self/mountinfo entry") from exc
+            if len(fields) < 10 or separator + 3 >= len(fields):
+                raise RuntimeError("malformed /proc/self/mountinfo entry")
+            if (
+                not re.fullmatch(r"[0-9]+", fields[0])
+                or not re.fullmatch(r"[0-9]+", fields[1])
+                or not re.fullmatch(r"[0-9]+:[0-9]+", fields[2])
+                or not fields[3].startswith("/")
+                or not fields[4].startswith("/")
+            ):
+                raise RuntimeError("invalid required field in /proc/self/mountinfo entry")
+            encoded_mountpoint = fields[4]
+            if re.search(r"\\(?!040|011|012|134)", encoded_mountpoint):
+                raise RuntimeError("invalid mountpoint escape in /proc/self/mountinfo")
+            mountpoint = re.sub(
+                r"\\(040|011|012|134)",
+                lambda match: escapes[match.group(1)],
+                encoded_mountpoint,
+            )
+            mountpoints.add(os.path.normpath(mountpoint))
+        if not mountpoints:
+            raise RuntimeError("/proc/self/mountinfo contains no mount entries")
+        return mountpoints
+
+    @classmethod
+    def _mountpoint_present(cls, path: str) -> bool:
+        """Check the process mount namespace, failing if Linux mount state is unreadable."""
+        target = os.path.normpath(os.path.realpath(path))
+        return target in cls._mountpoints_in_process_namespace()
+
+    @classmethod
+    def _assert_no_mounts_beneath(cls, path: Path) -> None:
+        """Fail closed if any active mount remains at or beneath a work directory."""
+        target = os.path.normpath(os.path.realpath(path))
+        remaining = []
+        for mountpoint in cls._mountpoints_in_process_namespace():
+            if os.path.commonpath((target, mountpoint)) == target:
+                remaining.append(mountpoint)
+        if remaining:
+            raise RuntimeError(f"mounts remain beneath workflow workdir {target}: {', '.join(sorted(remaining))}")
