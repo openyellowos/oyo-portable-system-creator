@@ -23,11 +23,18 @@ class ChrootHelper:
         finally:
             failed = False
             for item in reversed(binds):
-                result = self.runner.run(["umount", "-lf", str(root / item)], check=False)
-                if result.returncode != 0:
+                try:
+                    result = self.runner.run(["umount", "-lf", str(root / item)], check=False)
+                    if result.returncode != 0:
+                        failed = True
+                except Exception:
                     failed = True
-            if run_error is None and failed:
-                raise AppError.translated("E699", "error.bind_cleanup_failed", fatal=False)
+            if failed:
+                # Preserve this safety-critical error even when the chroot
+                # command also failed; Workflow must not remove the workdir.
+                raise AppError.translated(
+                    "E699", "error.bind_cleanup_failed", fatal=False
+                ) from run_error
 
         if run_error is not None:
             raise AppError.translated("E999", "error.chroot_run_failed", reason=str(run_error)) from run_error

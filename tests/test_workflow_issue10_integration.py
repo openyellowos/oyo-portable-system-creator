@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from src.core.errors import AppError
 from src.core.state import ExecutionState
 from src.core.workflow import Workflow
 
@@ -285,6 +286,32 @@ class WorkflowTests(unittest.TestCase):
         )
         self.assertTrue(any("システムをコピー (1/2)" in msg for msg in self.logger.messages))
         self.assertTrue(any("システムを再同期 (2/2)" in msg for msg in self.logger.messages))
+
+
+    def test_chroot_bind_unmount_error_blocks_workdir_and_mapper_cleanup(self) -> None:
+        state = ExecutionState(
+            mode="create",
+            target_device="/dev/sdz",
+            options={"encryption_enabled": True},
+        )
+        workdir = self.work_root / "chroot-bind-failed"
+        workdir.mkdir()
+        events: list[str] = []
+        self.workflow.suspend_inhibitor_factory = lambda: DummyInhibitor(events)
+        error = AppError.translated("E699", "error.bind_cleanup_failed", fatal=False)
+        with (
+            patch("src.core.workflow.tempfile.mkdtemp", return_value=str(workdir)),
+            patch.object(self.boot_service, "install_grub", side_effect=error),
+            patch.object(self.partition_service, "close_encrypted_root") as close_mapper,
+            patch("src.core.workflow.shutil.rmtree") as remove_workdir,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "chroot bind unmount failed"):
+                self.workflow.run_create(state)
+        close_mapper.assert_not_called()
+        remove_workdir.assert_not_called()
+        self.assertTrue(state.metadata.get("_chroot_bind_cleanup_failed"))
+        self.assertTrue(workdir.exists())
+        self.assertEqual(events, ["inhibit-start", "inhibit-release"])
 
     def test_inhibitor_covers_creation_and_is_released_after_mount_cleanup(self) -> None:
         events: list[str] = []

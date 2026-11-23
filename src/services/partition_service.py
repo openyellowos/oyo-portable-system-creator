@@ -9,6 +9,7 @@ from pathlib import Path
 from src.core.errors import AppError
 from src.infra.command_runner import CommandRunner
 from src.infra.logger import AppLogger
+from src.infra.mountinfo import read_mountinfo_entries
 
 
 class PartitionService:
@@ -219,25 +220,11 @@ class PartitionService:
         """Return a mount's source from Linux mountinfo; None means confirmed absent."""
         target = PartitionService.canonical_mountpoint(mountpoint)
         found_source: str | None = None
-        for line in Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines():
-            before, separator, after = line.partition(" - ")
-            if not separator:
-                raise RuntimeError("malformed /proc/self/mountinfo entry")
-            fields = before.split()
-            tail = after.split()
-            if len(fields) < 5 or len(tail) < 2:
-                raise RuntimeError("malformed /proc/self/mountinfo entry")
-            decoded_mountpoint = PartitionService._unescape_mountinfo(fields[4])
+        for decoded_mountpoint, decoded_source in read_mountinfo_entries():
             if PartitionService.canonical_mountpoint(decoded_mountpoint) == target:
-                # Mountinfo is ordered by mount ID; the last entry is the visible
-                # topmost mount when a mountpoint has been over-mounted.
-                found_source = PartitionService._unescape_mountinfo(tail[1])
+                # Preserve kernel order: the last matching entry is topmost.
+                found_source = decoded_source
         return found_source
-
-    @staticmethod
-    def _unescape_mountinfo(value: str) -> str:
-        import re
-        return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), value)
 
     def mapper_backing_device(self, mapper_name: str) -> str | None:
         result = self.runner.run(["cryptsetup", "status", mapper_name], check=False)

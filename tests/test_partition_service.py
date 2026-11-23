@@ -154,6 +154,24 @@ class PartitionServiceTests(unittest.TestCase):
             self.assertEqual(PartitionService.mount_source_for("/mnt/a b"), "/dev/sda1")
             self.assertIsNone(PartitionService.mount_source_for("/not-mounted"))
 
+
+    def test_mount_source_for_preserves_nbsp_and_topmost_source(self) -> None:
+        path = "/mnt/USB\u00a0volume"
+        fixture = (
+            f"36 25 8:1 / {path} rw - ext4 /dev/fake1 rw\\n"
+            f"37 25 8:2 / {path} rw - ext4 /dev/fake2 rw\\n"
+        )
+        with patch("pathlib.Path.read_text", return_value=fixture):
+            self.assertEqual(PartitionService.mount_source_for(path), "/dev/fake2")
+            self.assertIsNone(PartitionService.mount_source_for("/mnt/other"))
+
+    def test_mount_source_for_rejects_malformed_snapshot(self) -> None:
+        for fixture in ("", "broken entry\\n", "36 25 8:1 / relative rw - ext4 /dev/fake rw\\n"):
+            with self.subTest(fixture=fixture):
+                with patch("pathlib.Path.read_text", return_value=fixture):
+                    with self.assertRaises(RuntimeError):
+                        PartitionService.mount_source_for("/mnt/USB\u00a0volume")
+
     def test_prepare_device_unmounts_every_mountpoint_including_paths_with_spaces(self) -> None:
         runner = DummyRunner()
         runner.outputs[self.lsblk_command()] = (
