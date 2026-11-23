@@ -17,11 +17,19 @@ class FakeRunner:
         self.failed_unmount = failed_unmount
         self.failed_chroot = failed_chroot
         self.calls: list[list[str]] = []
+        self.unmount_count = 0
+        self.interrupt_second_unmount = False
 
     def run(self, command: list[str], *, check: bool = True) -> FakeResult:
         self.calls.append(command)
-        if command[0] == "umount" and command[-1].endswith("/dev") and self.failed_unmount:
-            return FakeResult(32)
+        if command[0] == "umount":
+            self.unmount_count += 1
+            if self.interrupt_second_unmount and self.unmount_count == 2:
+                raise KeyboardInterrupt()
+            if (command[-1].endswith("/dev") and self.failed_unmount) or (
+                self.interrupt_second_unmount and self.unmount_count == 1
+            ):
+                return FakeResult(32)
         if command[0] == "chroot" and self.failed_chroot:
             raise RuntimeError("chroot command failed")
         return FakeResult()
@@ -41,6 +49,18 @@ class ChrootBindReleaseTests(unittest.TestCase):
             ChrootHelper(runner).run_in_chroot(Path("/fake/root"), ["true"])
         self.assertEqual(found.exception.code, "E699")
         self.assertIsInstance(found.exception.__cause__, RuntimeError)
+
+    def test_prior_bind_failure_is_latched_before_keyboard_interrupt(self) -> None:
+        runner = FakeRunner()
+        runner.interrupt_second_unmount = True
+        failures: list[str] = []
+        with self.assertRaises(KeyboardInterrupt):
+            ChrootHelper(runner).run_in_chroot(
+                Path("/fake/root"), ["true"],
+                on_bind_cleanup_failure=lambda: failures.append("failed"),
+            )
+        self.assertEqual(runner.unmount_count, 2)
+        self.assertEqual(failures, ["failed", "failed"])
 
     def test_chroot_command_failure_without_bind_failure_keeps_e999(self) -> None:
         runner = FakeRunner(failed_chroot=True)

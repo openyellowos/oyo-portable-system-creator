@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from src.core.errors import AppError
@@ -10,7 +11,13 @@ class ChrootHelper:
     def __init__(self, runner: CommandRunner) -> None:
         self.runner = runner
 
-    def run_in_chroot(self, root: Path, command: list[str]) -> None:
+    def run_in_chroot(
+        self,
+        root: Path,
+        command: list[str],
+        *,
+        on_bind_cleanup_failure: Callable[[], None] | None = None,
+    ) -> None:
         binds = ["dev", "proc", "sys", "run"]
         run_error: Exception | None = None
         try:
@@ -27,8 +34,16 @@ class ChrootHelper:
                     result = self.runner.run(["umount", "-lf", str(root / item)], check=False)
                     if result.returncode != 0:
                         failed = True
-                except Exception:
+                        if on_bind_cleanup_failure is not None:
+                            on_bind_cleanup_failure()
+                except BaseException as exc:
+                    # Immediately record failure before cancellation can
+                    # bypass the later E699 summary.
                     failed = True
+                    if on_bind_cleanup_failure is not None:
+                        on_bind_cleanup_failure()
+                    if not isinstance(exc, Exception):
+                        raise
             if failed:
                 # Preserve this safety-critical error even when the chroot
                 # command also failed; Workflow must not remove the workdir.

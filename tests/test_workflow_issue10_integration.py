@@ -8,6 +8,8 @@ from unittest.mock import patch
 from src.core.errors import AppError
 from src.core.state import ExecutionState
 from src.core.workflow import Workflow
+from src.infra.chroot import ChrootHelper
+from src.services.boot_service import BootService
 
 
 class DummyLogger:
@@ -287,6 +289,51 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue(any("システムをコピー (1/2)" in msg for msg in self.logger.messages))
         self.assertTrue(any("システムを再同期 (2/2)" in msg for msg in self.logger.messages))
 
+
+    def test_real_chroot_cancel_after_failed_bind_unmount_latches_cleanup(self) -> None:
+        # Real Workflow -> BootService -> ChrootHelper, with fake commands.
+        class InterruptingChrootRunner(DummyRunner):
+            def __init__(self) -> None:
+                super().__init__()
+                self.bind_releases = 0
+
+            def run(self, command: list[str], check: bool = False) -> DummyRunnerResult:
+                if command[0] == "umount":
+                    self.bind_releases += 1
+                    if self.bind_releases == 1:
+                        return DummyRunnerResult(returncode=32)
+                    if self.bind_releases == 2:
+                        raise KeyboardInterrupt()
+                return super().run(command, check)
+
+        runner = InterruptingChrootRunner()
+        self.workflow.boot_service = BootService(runner, ChrootHelper(runner))
+        state = ExecutionState(
+            mode="create", target_device="/dev/sdz",
+            options={"encryption_enabled": True},
+        )
+        workdir = self.work_root / "cancel-after-failed-bind"
+        workdir.mkdir()
+        marker = workdir / "sentinel"
+        marker.write_text("keep", encoding="utf-8")
+        events: list[str] = []
+        self.workflow.suspend_inhibitor_factory = lambda: DummyInhibitor(events)
+
+        with (
+            patch("src.core.workflow.tempfile.mkdtemp", return_value=str(workdir)),
+            patch.object(self.workflow, "_assert_no_mounts_beneath") as mounts_absent,
+            patch.object(self.partition_service, "close_encrypted_root") as mapper_close,
+            patch("src.core.workflow.shutil.rmtree") as remove_workdir,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "chroot bind unmount failed"):
+                self.workflow.run_create(state)
+        self.assertEqual(runner.bind_releases, 2)
+        mounts_absent.assert_called()
+        mapper_close.assert_not_called()
+        remove_workdir.assert_not_called()
+        self.assertTrue(state.metadata.get("_chroot_bind_cleanup_failed"))
+        self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
+        self.assertEqual(events, ["inhibit-start", "inhibit-release"])
 
     def test_chroot_bind_unmount_error_blocks_workdir_and_mapper_cleanup(self) -> None:
         state = ExecutionState(

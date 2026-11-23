@@ -93,6 +93,11 @@ class Workflow:
                     state.metadata["luks_mapper_name"] = name
                     state.metadata["luks_mapper_backing_device"] = backing_device
 
+                def latch_bind_cleanup_failure() -> None:
+                    # Persist each failed chroot bind release immediately,
+                    # even if a later umount is cancelled.
+                    state.metadata["_chroot_bind_cleanup_failed"] = True
+
                 root_mount, root_device, boot_mount = self.partition_service.make_filesystems_and_mount(
                     efi,
                     boot,
@@ -139,11 +144,16 @@ class Workflow:
                     root_mount,
                     state.target_device or "",
                     boot_uuid,
+                    on_bind_cleanup_failure=latch_bind_cleanup_failure,
                 )
                 self._update_progress(state, 78, self.translate("workflow.initramfs"))
-                self.boot_service.update_initramfs(root_mount)
+                self.boot_service.update_initramfs(
+                    root_mount, on_bind_cleanup_failure=latch_bind_cleanup_failure,
+                )
                 self._update_progress(state, 82, self.translate("workflow.grub.config"))
-                self.boot_service.refresh_grub_config(root_mount)
+                self.boot_service.refresh_grub_config(
+                    root_mount, on_bind_cleanup_failure=latch_bind_cleanup_failure,
+                )
 
                 self._update_progress(state, 85, self.translate("workflow.optimize"))
                 self.optimize_service.apply(root_mount)
