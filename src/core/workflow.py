@@ -227,6 +227,9 @@ class Workflow:
                 failures.append(exc)
 
         if failures:
+            # Keep attempted resources available for any later reconciliation.
+            # Some unmounts may have succeeded; a retry will recheck actual state.
+            state.mounted_paths[:] = mounts
             raise failures[0]
 
     @staticmethod

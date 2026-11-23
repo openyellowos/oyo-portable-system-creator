@@ -179,7 +179,11 @@ class WorkflowTests(unittest.TestCase):
         state = ExecutionState(mode="create", target_device="/dev/sdz")
         with patch("src.core.workflow.tempfile.mkdtemp", return_value=str(workdir)):
             with patch("src.core.workflow.shutil.rmtree") as rmtree:
-                with patch.object(self.workflow, "_mountpoint_present", side_effect=mount_check):
+                def simulate_workdir_check(path: Path) -> None:
+                    if mount_check(str(path)):
+                        raise RuntimeError("workdir remains mounted")
+
+                with patch.object(self.workflow, "_assert_no_mounts_beneath", side_effect=simulate_workdir_check):
                     with patch.object(self.partition_service, "close_encrypted_root") as close_mapper:
                         with self.assertRaises(RuntimeError):
                             self.workflow.run_create(state)
