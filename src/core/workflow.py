@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -71,6 +72,19 @@ class Workflow:
             self._update_progress(state, 30, self.translate("workflow.fs.mount"))
             encryption_enabled = bool(state.options.get("encryption_enabled"))
             mapper_name = str(state.options.get("luks_mapper_name") or "oyoport-cryptroot")
+
+            def register_mount_attempt(path: Path, source: str | None = None) -> None:
+                mount_path = PartitionService.canonical_mountpoint(path)
+                if mount_path not in state.mounted_paths:
+                    state.mounted_paths.append(mount_path)
+                if source is not None:
+                    sources = state.metadata.setdefault("mount_sources", {})
+                    sources[mount_path] = source
+
+            def register_mapper_open_attempt(name: str, backing_device: str) -> None:
+                state.metadata["luks_mapper_name"] = name
+                state.metadata["luks_mapper_backing_device"] = backing_device
+
             root_mount, root_device, boot_mount = self.partition_service.make_filesystems_and_mount(
                 efi,
                 boot,
@@ -79,9 +93,14 @@ class Workflow:
                 encryption_enabled=encryption_enabled,
                 luks_passphrase=state.options.get("luks_passphrase"),
                 mapper_name=mapper_name,
+                on_mount_attempt=register_mount_attempt,
+                on_mapper_open_attempt=register_mapper_open_attempt,
             )
-            state.mounted_paths.append(str(root_mount))
-            state.mounted_paths.append(str(boot_mount))
+            # Retain compatibility with service implementations that do not
+            # report individual attempts; the real service registers before
+            # each command to cover interruption windows.
+            register_mount_attempt(root_mount, root_device)
+            register_mount_attempt(boot_mount, boot)
             state.metadata["root_device"] = root_device
             if encryption_enabled:
                 state.metadata["luks_uuid"] = self._blkid(root)
@@ -93,8 +112,12 @@ class Workflow:
             self._update_progress(state, 55, self.translate("workflow.copy.second"))
             self.copy_service.rsync_copy(source_path, root_mount, mode)
 
-            efi_mount = self.partition_service.mount_efi_partition(efi, root_mount)
-            state.mounted_paths.append(str(efi_mount))
+            efi_mount = self.partition_service.mount_efi_partition(
+                efi,
+                root_mount,
+                on_mount_attempt=register_mount_attempt,
+            )
+            register_mount_attempt(efi_mount, efi)
 
             self._update_progress(state, 60, self.translate("workflow.fstab"))
             root_uuid = self._blkid(str(state.metadata.get("root_device") or root))
@@ -129,8 +152,10 @@ class Workflow:
             self._update_progress(state, 100, self.translate("workflow.done"))
             return state
         finally:
+            # Removing this directory can destroy the only copy of data under
+            # a still-mounted filesystem. Preserve it whenever cleanup fails.
             self.cleanup(state)
-            shutil.rmtree(workdir, ignore_errors=True)
+            shutil.rmtree(workdir)
 
     def _update_progress(self, state: ExecutionState, percent: int, step: str) -> None:
         state.set_progress(percent, step)
@@ -142,8 +167,61 @@ class Workflow:
 
     def cleanup(self, state: ExecutionState) -> None:
         mounts = state.mounted_paths[:]
-        for p in reversed(mounts):
-            self.device_service.runner.run(["umount", "-lf", p], check=False)
+        failures: list[BaseException] = []
+        mount_sources = state.metadata.get("mount_sources", {})
+        for path in reversed(mounts):
+            try:
+                canonical_path = PartitionService.canonical_mountpoint(path)
+                mount_state_reader = getattr(self.partition_service, "mount_source_for", None)
+                if mount_state_reader is not None:
+                    actual_source = mount_state_reader(canonical_path)
+                    if actual_source is None:
+                        state.mounted_paths.remove(path)
+                        continue
+                    expected_source = mount_sources.get(canonical_path, mount_sources.get(path))
+                    if expected_source is None or os.path.realpath(actual_source) != os.path.realpath(expected_source):
+                        failures.append(RuntimeError(f"mount identity mismatch or unknown for {path}"))
+                        continue
+                result = self.device_service.runner.run(["umount", canonical_path], check=False)
+                returncode = getattr(result, "returncode", 0)
+                if mount_state_reader is not None:
+                    remaining_source = mount_state_reader(canonical_path)
+                    if remaining_source is None:
+                        state.mounted_paths.remove(path)
+                    else:
+                        reason = (
+                            f"umount failed for {path} (exit status {returncode})"
+                            if returncode != 0
+                            else f"mount remains active after umount: {path}"
+                        )
+                        failures.append(RuntimeError(reason))
+                elif returncode != 0:
+                    failures.append(RuntimeError(f"umount failed for {path} (exit status {returncode})"))
+                else:
+                    state.mounted_paths.remove(path)
+            except BaseException as exc:
+                # Unknown mount state is unsafe: retain the workdir and mapper.
+                failures.append(exc)
+
         mapper_name = state.metadata.get("luks_mapper_name")
-        self.partition_service.close_encrypted_root(str(mapper_name) if mapper_name else None)
-        state.mounted_paths.clear()
+        if not failures and mapper_name:
+            try:
+                expected_backing = state.metadata.get("luks_mapper_backing_device")
+                backing_reader = getattr(self.partition_service, "mapper_backing_device", None)
+                if backing_reader is not None:
+                    actual_backing = backing_reader(str(mapper_name))
+                    if actual_backing is not None:
+                        if not expected_backing or os.path.realpath(actual_backing) != os.path.realpath(str(expected_backing)):
+                            raise RuntimeError(f"mapper {mapper_name} has unexpected backing device")
+                        self.partition_service.close_encrypted_root(str(mapper_name))
+                elif expected_backing is None:
+                    raise RuntimeError(f"cannot verify backing device for mapper {mapper_name}")
+                else:
+                    # Compatibility path for service fakes; production has the
+                    # mapper_backing_device verifier above.
+                    self.partition_service.close_encrypted_root(str(mapper_name))
+            except BaseException as exc:
+                failures.append(exc)
+
+        if failures:
+            raise failures[0]

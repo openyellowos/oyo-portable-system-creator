@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
+
+from src.core.errors import AppError
 
 from src.services.device_service import DeviceService
 
@@ -44,6 +47,19 @@ class DeviceServiceTests(unittest.TestCase):
 
     def test_check_os_does_not_require_openyellow(self) -> None:
         self.service.check_os()
+
+    def test_check_required_commands_requires_dd_and_udevadm(self) -> None:
+        for missing_command in ("dd", "udevadm"):
+            with self.subTest(command=missing_command):
+                with patch(
+                    "src.services.device_service.shutil.which",
+                    side_effect=lambda command: None if command == missing_command else f"/usr/bin/{command}",
+                ):
+                    with self.assertRaises(AppError) as raised:
+                        self.service.check_required_commands()
+
+                self.assertEqual(raised.exception.code, "E122")
+                self.assertEqual(raised.exception.message_params["commands"], missing_command)
 
 
 if __name__ == "__main__":
