@@ -18,14 +18,20 @@ class DummyLogger:
 
 
 class DummyRunnerResult:
-    def __init__(self, stdout: str = "") -> None:
+    def __init__(self, stdout: str = "", returncode: int = 0) -> None:
         self.stdout = stdout
+        self.returncode = returncode
 
 
 class DummyRunner:
+    def __init__(self) -> None:
+        self.umount_returncode = 0
+
     def run(self, command: list[str], check: bool = False) -> DummyRunnerResult:
         if command[:3] == ["blkid", "-s", "UUID"]:
             return DummyRunnerResult(stdout="DUMMY-UUID\n")
+        if command and command[0] == "umount":
+            return DummyRunnerResult(returncode=self.umount_returncode)
         return DummyRunnerResult(stdout="")
 
 
@@ -164,6 +170,99 @@ class WorkflowTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.tempdir.cleanup()
+
+    def _assert_failed_cleanup_preserves_workdir(self, mount_check) -> None:
+        workdir = self.work_root / "workflow-workdir"
+        workdir.mkdir()
+        marker = workdir / "marker"
+        marker.write_text("preserve me")
+        state = ExecutionState(mode="create", target_device="/dev/sdz")
+        with patch("src.core.workflow.tempfile.mkdtemp", return_value=str(workdir)):
+            with patch("src.core.workflow.shutil.rmtree") as rmtree:
+                with patch.object(self.workflow, "_mountpoint_present", side_effect=mount_check):
+                    with patch.object(self.partition_service, "close_encrypted_root") as close_mapper:
+                        with self.assertRaises(RuntimeError):
+                            self.workflow.run_create(state)
+
+        rmtree.assert_not_called()
+        close_mapper.assert_not_called()
+        self.assertTrue(workdir.is_dir())
+        self.assertEqual(marker.read_text(), "preserve me")
+        self.assertTrue(state.mounted_paths)
+
+    def test_nonzero_umount_preserves_workdir(self) -> None:
+        self.workflow.device_service.runner.umount_returncode = 32
+        self._assert_failed_cleanup_preserves_workdir(lambda _path: False)
+
+    def test_successful_umount_still_mounted_preserves_workdir(self) -> None:
+        self._assert_failed_cleanup_preserves_workdir(lambda _path: True)
+
+    def test_successful_umount_with_unreadable_mount_state_preserves_workdir(self) -> None:
+        def unreadable(_path: str) -> bool:
+            raise OSError("mount table unavailable")
+
+        self._assert_failed_cleanup_preserves_workdir(unreadable)
+
+    def test_partial_mount_failure_preserves_workdir_and_skips_mapper_close(self) -> None:
+        workdir = self.work_root / "workflow\u00a0workdir"
+        root_mount = workdir / "root"
+        root_mount.mkdir(parents=True)
+        marker = root_mount / "marker"
+        marker.write_text("preserve mounted contents")
+        mountinfo = f"36 25 8:1 / {root_mount} rw - ext4 /dev/fake-root rw\n"
+        state = ExecutionState(
+            mode="create",
+            target_device="/dev/sdz",
+            options={"encryption_enabled": True},
+        )
+
+        def fail_after_root_mount(_efi, _boot, _root, _workdir, **_kwargs):
+            raise RuntimeError("boot mount failed after root mount")
+
+        with patch("src.core.workflow.tempfile.mkdtemp", return_value=str(workdir)):
+            with patch.object(
+                self.partition_service,
+                "make_filesystems_and_mount",
+                side_effect=fail_after_root_mount,
+            ):
+                with patch("pathlib.Path.read_text", return_value=mountinfo):
+                    with patch("src.core.workflow.shutil.rmtree") as rmtree:
+                        with patch.object(self.partition_service, "close_encrypted_root") as close_mapper:
+                            with self.assertRaisesRegex(RuntimeError, "Mount cleanup was not confirmed"):
+                                self.workflow.run_create(state)
+
+        rmtree.assert_not_called()
+        close_mapper.assert_not_called()
+        self.assertEqual(marker.read_text(), "preserve mounted contents")
+
+    def test_mountinfo_parser_decodes_escaped_mountpoint(self) -> None:
+        mountpoint = self.work_root / "mounted volume"
+        mountinfo = f"36 25 8:1 / {mountpoint.parent}/mounted\\040volume rw shared:7 - ext4 /dev/fake rw\n"
+        with patch("pathlib.Path.read_text", return_value=mountinfo):
+            self.assertTrue(Workflow._mountpoint_present(str(mountpoint)))
+
+    def test_mountinfo_parser_preserves_unicode_whitespace_in_mountpoint(self) -> None:
+        mountpoint = self.work_root / "mounted\u00a0volume"
+        mountinfo = f"36 25 8:1 / {mountpoint} rw - ext4 /dev/fake rw\n"
+        with patch("pathlib.Path.read_text", return_value=mountinfo):
+            self.assertTrue(Workflow._mountpoint_present(str(mountpoint)))
+
+    def test_mountinfo_parser_rejects_empty_or_malformed_snapshot(self) -> None:
+        malformed = (
+            "broken entry\n",
+            "36 25 8:1 / relative rw - ext4 /dev/fake rw\n",
+            "not-an-id 25 8:1 / /tmp/root rw - ext4 /dev/fake rw\n",
+        )
+        for mountinfo in ("", *malformed):
+            with self.subTest(mountinfo=mountinfo):
+                with patch("pathlib.Path.read_text", return_value=mountinfo):
+                    with self.assertRaises(RuntimeError):
+                        Workflow._mountpoints_in_process_namespace()
+
+    def test_mountinfo_parser_fails_closed_when_unreadable(self) -> None:
+        with patch("pathlib.Path.read_text", side_effect=OSError("permission denied")):
+            with self.assertRaisesRegex(OSError, "permission denied"):
+                Workflow._mountpoints_in_process_namespace()
 
     def test_run_create_runs_rsync_twice(self) -> None:
         state = ExecutionState(mode="create", target_device="/dev/sdz")

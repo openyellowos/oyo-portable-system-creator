@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import re
 import shutil
 import tempfile
 from collections.abc import Callable
@@ -72,6 +74,7 @@ class Workflow:
         self._update_progress(state, 15, self.translate("workflow.precheck.done"))
         with self.suspend_inhibitor_factory():
             workdir = Path(tempfile.mkdtemp(prefix="oyo-portable-"))
+            state.metadata["_workflow_workdir"] = str(workdir)
             try:
                 self._update_progress(state, 20, self.translate("workflow.partition.create"))
                 efi, boot, root = self.partition_service.prepare_device(state.target_device or "")
@@ -137,6 +140,7 @@ class Workflow:
                 return state
             finally:
                 self.cleanup(state)
+                self._assert_no_mounts_beneath(workdir)
                 shutil.rmtree(workdir, ignore_errors=True)
 
     def _update_progress(self, state: ExecutionState, percent: int, step: str) -> None:
@@ -149,8 +153,90 @@ class Workflow:
 
     def cleanup(self, state: ExecutionState) -> None:
         mounts = state.mounted_paths[:]
+        cleanup_errors: list[str] = []
         for p in reversed(mounts):
-            self.device_service.runner.run(["umount", "-lf", p], check=False)
+            result = self.device_service.runner.run(["umount", "-lf", p], check=False)
+            if getattr(result, "returncode", None) != 0:
+                cleanup_errors.append(f"umount failed for {p}")
+            try:
+                if self._mountpoint_present(p):
+                    cleanup_errors.append(f"mount remains at {p}")
+            except Exception as exc:
+                cleanup_errors.append(f"could not verify mount state for {p}: {exc}")
+        workdir = state.metadata.get("_workflow_workdir")
+        if workdir:
+            try:
+                self._assert_no_mounts_beneath(Path(str(workdir)))
+            except Exception as exc:
+                cleanup_errors.append(f"could not confirm workdir mounts are absent: {exc}")
+        if cleanup_errors:
+            raise RuntimeError("Mount cleanup was not confirmed: " + "; ".join(cleanup_errors))
+
         mapper_name = state.metadata.get("luks_mapper_name")
         self.partition_service.close_encrypted_root(str(mapper_name) if mapper_name else None)
         state.mounted_paths.clear()
+
+    @staticmethod
+    def _mountpoints_in_process_namespace() -> set[str]:
+        """Read mountpoints from Linux mountinfo, rejecting incomplete snapshots."""
+        mountinfo = Path("/proc/self/mountinfo").read_text(encoding="utf-8")
+        if not mountinfo:
+            raise RuntimeError("/proc/self/mountinfo is empty")
+
+        escapes = {"040": " ", "011": "\t", "012": "\n", "134": "\\"}
+        mountpoints: set[str] = set()
+        lines = mountinfo.split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()
+        if not lines or any(not line for line in lines):
+            raise RuntimeError("malformed /proc/self/mountinfo snapshot")
+
+        for line in lines:
+            # mountinfo escapes ASCII whitespace in paths; tokenize only on
+            # ASCII spaces so valid Unicode whitespace in filenames is kept.
+            fields = line.split(" ")
+            if "" in fields:
+                raise RuntimeError("malformed /proc/self/mountinfo entry")
+            try:
+                separator = fields.index("-", 6)
+            except ValueError as exc:
+                raise RuntimeError("malformed /proc/self/mountinfo entry") from exc
+            if len(fields) < 10 or separator + 3 >= len(fields):
+                raise RuntimeError("malformed /proc/self/mountinfo entry")
+            if (
+                not re.fullmatch(r"[0-9]+", fields[0])
+                or not re.fullmatch(r"[0-9]+", fields[1])
+                or not re.fullmatch(r"[0-9]+:[0-9]+", fields[2])
+                or not fields[3].startswith("/")
+                or not fields[4].startswith("/")
+            ):
+                raise RuntimeError("invalid required field in /proc/self/mountinfo entry")
+            encoded_mountpoint = fields[4]
+            if re.search(r"\\(?!040|011|012|134)", encoded_mountpoint):
+                raise RuntimeError("invalid mountpoint escape in /proc/self/mountinfo")
+            mountpoint = re.sub(
+                r"\\(040|011|012|134)",
+                lambda match: escapes[match.group(1)],
+                encoded_mountpoint,
+            )
+            mountpoints.add(os.path.normpath(mountpoint))
+        if not mountpoints:
+            raise RuntimeError("/proc/self/mountinfo contains no mount entries")
+        return mountpoints
+
+    @classmethod
+    def _mountpoint_present(cls, path: str) -> bool:
+        """Check the process mount namespace, failing if Linux mount state is unreadable."""
+        target = os.path.normpath(os.path.realpath(path))
+        return target in cls._mountpoints_in_process_namespace()
+
+    @classmethod
+    def _assert_no_mounts_beneath(cls, path: Path) -> None:
+        """Fail closed if any active mount remains at or beneath a work directory."""
+        target = os.path.normpath(os.path.realpath(path))
+        remaining = []
+        for mountpoint in cls._mountpoints_in_process_namespace():
+            if os.path.commonpath((target, mountpoint)) == target:
+                remaining.append(mountpoint)
+        if remaining:
+            raise RuntimeError(f"mounts remain beneath workflow workdir {target}: {', '.join(sorted(remaining))}")
