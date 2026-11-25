@@ -5,8 +5,10 @@ import threading
 import time
 import sys
 import os
+import subprocess
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 from src.core.errors import AppError
 from src.infra.command_runner import CommandRunner
@@ -133,6 +135,8 @@ class CommandRunnerTests(unittest.TestCase):
         runner = CommandRunner(DummyLogger(), cancel_event=cancel_event)
         runner.TERMINATION_GRACE_SECONDS = 0.25
         outcome: list[BaseException] = []
+        communication_completed = threading.Event()
+        descendant_alive_at_completion: list[bool] = []
         with tempfile.TemporaryDirectory() as tmpdir:
             pid_file = Path(tmpdir) / "child.pid"
             child_code = (
@@ -142,28 +146,42 @@ class CommandRunnerTests(unittest.TestCase):
                 "os.close(1); os.close(2); time.sleep(30)"
             )
             parent_code = (
-                "import subprocess, sys, time; "
-                f"subprocess.Popen([sys.executable, '-c', {child_code!r}]); "
-                "time.sleep(0.35)"
+                "import os, subprocess, sys, time\n"
+                f"subprocess.Popen([sys.executable, '-c', {child_code!r}])\n"
+                "deadline = time.monotonic() + 5\n"
+                f"while not os.path.exists({str(pid_file)!r}) and time.monotonic() < deadline:\n"
+                "    time.sleep(0.01)\n"
             )
+            command = [sys.executable, "-c", parent_code]
+            original_communicate = subprocess.Popen.communicate
+            cancellation_injected = False
+
+            def communicate_then_cancel(process, *args, **kwargs):
+                nonlocal cancellation_injected
+                result = original_communicate(process, *args, **kwargs)
+                if process.args == command and not cancellation_injected:
+                    cancellation_injected = True
+                    child_pid = int(pid_file.read_text(encoding="ascii"))
+                    descendant_alive_at_completion.append(self._pid_is_running(child_pid))
+                    communication_completed.set()
+                    cancel_event.set()
+                return result
 
             def run_command() -> None:
                 try:
-                    runner.run([sys.executable, "-c", parent_code])
+                    runner.run(command)
                 except BaseException as exc:
                     outcome.append(exc)
 
-            thread = threading.Thread(target=run_command)
-            thread.start()
-            deadline = time.monotonic() + 5
-            while not pid_file.exists() and time.monotonic() < deadline:
-                time.sleep(0.01)
-            self.assertTrue(pid_file.exists(), "descendant did not start")
+            with patch("subprocess.Popen.communicate", new=communicate_then_cancel):
+                thread = threading.Thread(target=run_command)
+                thread.start()
+                thread.join(4)
             child_pid = int(pid_file.read_text(encoding="ascii"))
-            cancel_event.set()
-            thread.join(4)
 
         self.assertFalse(thread.is_alive(), "cancellation must be rechecked after communicate returns")
+        self.assertTrue(communication_completed.is_set(), "leader communication did not complete")
+        self.assertEqual(descendant_alive_at_completion, [True], "race must be injected while descendant is live")
         self.assertEqual(len(outcome), 1)
         self.assertIsInstance(outcome[0], AppError)
         self.assertEqual(outcome[0].code, "E123")  # type: ignore[union-attr]
