@@ -4,7 +4,7 @@ import os
 import shutil
 import tempfile
 from collections.abc import Callable
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 
 from src.core.errors import AppError
@@ -12,6 +12,7 @@ from src.core.state import ExecutionState
 from src.gui.i18n import build_translator
 from src.infra.logger import AppLogger
 from src.infra.mountinfo import read_mountinfo_entries
+from src.infra.operation_lock import OperationLock
 from src.infra.suspend_inhibitor import SuspendInhibitor
 from src.services.boot_service import BootService
 from src.services.copy_service import CopyService
@@ -33,6 +34,7 @@ class Workflow:
         logger: AppLogger,
         language: str = "ja",
         suspend_inhibitor_factory: Callable[[], AbstractContextManager[object]] = SuspendInhibitor,
+        operation_lock_factory: Callable[[], AbstractContextManager[object]] = OperationLock,
     ) -> None:
         self.device_service = device_service
         self.partition_service = partition_service
@@ -42,6 +44,7 @@ class Workflow:
         self.firstboot_service = firstboot_service
         self.logger = logger
         self.suspend_inhibitor_factory = suspend_inhibitor_factory
+        self.operation_lock_factory = operation_lock_factory
         self.translate = build_translator(language)
 
     def precheck(self, state: ExecutionState) -> None:
@@ -68,16 +71,26 @@ class Workflow:
         return self._run(state, "backup")
 
     def _run(self, state: ExecutionState, mode: str) -> ExecutionState:
+        with self.operation_lock_factory():
+            self._update_progress(state, 5, self.translate("workflow.precheck.start"))
+            self.precheck(state)
+            self._check_cancelled()
+            self._assert_no_stale_work_mounts()
+            self._assert_no_target_residuals(state.target_device or "")
+            self._update_progress(state, 15, self.translate("workflow.precheck.done"))
+            return self._run_after_precheck(state, mode)
+
+    def _run_after_precheck(self, state: ExecutionState, mode: str) -> ExecutionState:
         # Keep the inhibitor active through cleanup so suspend cannot interrupt unmounts.
-        self._update_progress(state, 5, self.translate("workflow.precheck.start"))
-        self.precheck(state)
-        self._update_progress(state, 15, self.translate("workflow.precheck.done"))
         with self.suspend_inhibitor_factory():
             workdir = Path(tempfile.mkdtemp(prefix="oyo-portable-"))
             state.metadata["_workflow_workdir"] = str(workdir)
+            completed = False
             try:
+                self._check_cancelled()
                 self._update_progress(state, 20, self.translate("workflow.partition.create"))
                 efi, boot, root = self.partition_service.prepare_device(state.target_device or "")
+                self._check_cancelled()
                 self._update_progress(state, 30, self.translate("workflow.fs.mount"))
                 encryption_enabled = bool(state.options.get("encryption_enabled"))
                 mapper_name = str(state.options.get("luks_mapper_name") or "oyoport-cryptroot")
@@ -116,15 +129,19 @@ class Workflow:
                     state.metadata["luks_uuid"] = self._blkid(root)
                     state.metadata["luks_mapper_name"] = mapper_name
 
+                self._check_cancelled()
                 self._update_progress(state, 45, self.translate("workflow.copy.first"))
                 source_path = str(state.metadata.get("source_path") or self.copy_service.resolve_source(mode, state.source_device))
                 self.copy_service.rsync_copy(source_path, root_mount, mode)
+                self._check_cancelled()
                 self._update_progress(state, 55, self.translate("workflow.copy.second"))
                 self.copy_service.rsync_copy(source_path, root_mount, mode)
+                self._check_cancelled()
 
                 efi_mount = self.partition_service.mount_efi_partition(efi, root_mount, on_mount_attempt=register_mount_attempt)
                 register_mount_attempt(efi_mount, efi)
 
+                self._check_cancelled()
                 self._update_progress(state, 60, self.translate("workflow.fstab"))
                 root_uuid = self._blkid(str(state.metadata.get("root_device") or root))
                 boot_uuid = self._blkid(boot)
@@ -139,6 +156,7 @@ class Workflow:
                     luks_uuid=state.metadata.get("luks_uuid"),
                 )
 
+                self._check_cancelled()
                 self._update_progress(state, 70, self.translate("workflow.grub.install"))
                 self.boot_service.install_grub(
                     root_mount,
@@ -146,22 +164,25 @@ class Workflow:
                     boot_uuid,
                     on_bind_cleanup_failure=latch_bind_cleanup_failure,
                 )
+                self._check_cancelled()
                 self._update_progress(state, 78, self.translate("workflow.initramfs"))
                 self.boot_service.update_initramfs(
                     root_mount, on_bind_cleanup_failure=latch_bind_cleanup_failure,
                 )
+                self._check_cancelled()
                 self._update_progress(state, 82, self.translate("workflow.grub.config"))
                 self.boot_service.refresh_grub_config(
                     root_mount, on_bind_cleanup_failure=latch_bind_cleanup_failure,
                 )
 
+                self._check_cancelled()
                 self._update_progress(state, 85, self.translate("workflow.optimize"))
                 self.optimize_service.apply(root_mount)
+                self._check_cancelled()
                 self._update_progress(state, 92, self.translate("workflow.firstboot"))
                 self.firstboot_service.install(root_mount)
 
-                self._update_progress(state, 100, self.translate("workflow.done"))
-                return state
+                completed = True
             except AppError as exc:
                 # A failed chroot bind release is unsafe even if a later mountinfo
                 # snapshot says the bind is absent (e.g. lazy umount).
@@ -169,9 +190,62 @@ class Workflow:
                     state.metadata["_chroot_bind_cleanup_failed"] = True
                 raise
             finally:
-                self.cleanup(state)
-                self._assert_no_mounts_beneath(workdir)
-                shutil.rmtree(workdir, ignore_errors=True)
+                cleanup_scope = getattr(self.device_service.runner, "allow_cleanup_after_cancel", None)
+                with cleanup_scope() if cleanup_scope is not None else nullcontext():
+                    self.cleanup(state)
+                    self._assert_no_mounts_beneath(workdir)
+                    shutil.rmtree(workdir, ignore_errors=True)
+        if completed:
+            # A late cancellation during cleanup remains cancellation; only
+            # report completion after cleanup and inhibitor release.
+            self._check_cancelled()
+            self._update_progress(state, 100, self.translate("workflow.done"))
+            return state
+
+    def _check_cancelled(self) -> None:
+        checker = getattr(self.device_service.runner, "check_cancelled", None)
+        if checker is not None:
+            checker()
+
+    def _assert_no_target_residuals(self, device: str) -> None:
+        inspector = getattr(self.partition_service, "assert_no_target_residuals", None)
+        if inspector is None:
+            return
+        try:
+            inspector(device)
+        except AppError:
+            raise
+        except Exception as exc:
+            raise AppError.translated("E125", "error.residual_resources", reason=str(exc)) from exc
+
+    @staticmethod
+    def _stale_work_mounts() -> list[str]:
+        roots = {tempfile.gettempdir(), "/tmp", "/var/tmp"}
+        roots |= {os.path.realpath(root) for root in roots}
+        normalized_roots = {os.path.normpath(root) for root in roots}
+        stale: list[str] = []
+        for mountpoint, _source in read_mountinfo_entries():
+            candidate = os.path.normpath(mountpoint)
+            for root in normalized_roots:
+                try:
+                    relative = os.path.relpath(candidate, root)
+                except ValueError:
+                    continue
+                parts = Path(relative).parts
+                if parts and parts[0].startswith("oyo-portable-"):
+                    stale.append(candidate)
+                    break
+        return sorted(set(stale))
+
+    def _assert_no_stale_work_mounts(self) -> None:
+        try:
+            mounts = self._stale_work_mounts()
+        except Exception as exc:
+            raise AppError.translated("E125", "error.mount_state_unknown", reason=str(exc)) from exc
+        if mounts:
+            raise AppError.translated(
+                "E125", "error.residual_resources", reason="; ".join(mounts)
+            )
 
     def _update_progress(self, state: ExecutionState, percent: int, step: str) -> None:
         state.set_progress(percent, step)

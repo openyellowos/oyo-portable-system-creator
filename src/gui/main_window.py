@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import logging
 import string
+import threading
+from collections.abc import Callable
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
+from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -22,7 +25,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from src.core.errors import set_error_language
+from src.core.errors import AppError, set_error_language
 from src.core.state import ExecutionState
 from src.core.workflow import Workflow
 from src.gui.i18n import build_translator, detect_system_language
@@ -91,6 +94,8 @@ class DiagnosticWorker(QObject):
 class CreateWorker(QObject):
     finished = pyqtSignal(ExecutionState)
     failed = pyqtSignal(str)
+    cancelled = pyqtSignal(str)
+    cancel_stalled = pyqtSignal(str)
     progress = pyqtSignal(int, str)
     log = pyqtSignal(str)
 
@@ -99,6 +104,10 @@ class CreateWorker(QObject):
         self.target_device = target_device
         self.language = language
         self.options = options or {}
+        self.cancel_event = threading.Event()
+
+    def cancel(self) -> None:
+        self.cancel_event.set()
 
     def run(self) -> None:
         state = ExecutionState(
@@ -107,10 +116,21 @@ class CreateWorker(QObject):
             options={"yes": True, "force": False, "verbose": False, **self.options},
         )
         try:
-            controller, _ = build_services(verbose=False, log_signal=self.log, language=self.language)
+            controller, _ = build_services(
+                verbose=False,
+                log_signal=self.log,
+                language=self.language,
+                cancel_event=self.cancel_event,
+                cancel_stalled_callback=self.cancel_stalled.emit,
+            )
             state.add_progress_listener(self.progress.emit)
             result = controller.run(state)
             self.finished.emit(result)
+        except AppError as exc:
+            if exc.code == "E123":
+                self.cancelled.emit(str(exc))
+            else:
+                self.failed.emit(str(exc))
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -131,6 +151,8 @@ def build_services(
     verbose: bool,
     log_signal: pyqtSignal | None = None,
     language: str = "ja",
+    cancel_event: threading.Event | None = None,
+    cancel_stalled_callback: Callable[[str], None] | None = None,
 ) -> tuple[ControllerFacade, DeviceService]:
     set_error_language(language)
     logger = AppLogger()
@@ -140,7 +162,11 @@ def build_services(
         handler = SignalLogHandler(log_signal)
         logger.user_logger.addHandler(handler)
 
-    runner = CommandRunner(logger)
+    runner = CommandRunner(
+        logger,
+        cancel_event=cancel_event,
+        cancel_stalled_callback=cancel_stalled_callback,
+    )
     device = DeviceService(runner, logger)
     partition = PartitionService(runner, logger)
     copy = CopyService(runner)
@@ -162,6 +188,7 @@ class MainWindow(QMainWindow):
         self.worker_thread: QThread | None = None
         self.worker: QObject | None = None
         self.current_worker_kind: str | None = None
+        self._close_when_worker_stops = False
         self.device_paths: list[str] = []
         self.device_records: dict[str, dict] = {}
         self.doctor_ok = False
@@ -192,6 +219,9 @@ class MainWindow(QMainWindow):
 
         self.create_button = QPushButton(self.t("button.create"))
         self.create_button.clicked.connect(self.run_create)
+        self.cancel_button = QPushButton(self.t("button.cancel"))
+        self.cancel_button.clicked.connect(self.cancel_create)
+        self.cancel_button.hide()
 
         self.encryption_checkbox = QCheckBox(self.t("security.enable_encryption"))
         self.encryption_checkbox.toggled.connect(self._on_encryption_toggled)
@@ -263,6 +293,7 @@ class MainWindow(QMainWindow):
         action_row.setSpacing(10)
         action_row.addWidget(self.diagnose_button)
         action_row.addWidget(self.create_button)
+        action_row.addWidget(self.cancel_button)
         action_row.addStretch(1)
         outer.addLayout(action_row)
 
@@ -363,6 +394,9 @@ class MainWindow(QMainWindow):
         doctor_ready = self.doctor_ok and self.last_doctor_device == (self._selected_device() or "")
         self.diagnose_button.setEnabled(has_target and not busy)
         self.create_button.setEnabled(has_target and doctor_ready and not busy)
+        self.cancel_button.setVisible(
+            self.worker_thread is not None and self.current_worker_kind == "CreateWorker"
+        )
         self.reload_button.setEnabled(not busy)
         self.device_combo.setEnabled(not busy)
 
@@ -570,6 +604,11 @@ class MainWindow(QMainWindow):
         if hasattr(worker, "failed"):
             worker.failed.connect(self._on_worker_failed)
             worker.failed.connect(self.worker_thread.quit)
+        if hasattr(worker, "cancelled"):
+            worker.cancelled.connect(self._on_worker_cancelled)
+            worker.cancelled.connect(self.worker_thread.quit)
+        if hasattr(worker, "cancel_stalled"):
+            worker.cancel_stalled.connect(self._on_cancel_stalled)
 
         self.worker_thread.finished.connect(self._on_worker_stopped)
         self.worker_thread.finished.connect(worker.deleteLater)
@@ -641,11 +680,52 @@ class MainWindow(QMainWindow):
         self._set_status(self.t("status.failed"))
         QMessageBox.critical(self, self.t("dialog.error.title"), message)
 
+    def _on_worker_cancelled(self, message: str) -> None:
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("%p%")
+        self._append_log(self.t("log.cancelled", message=message))
+        self._set_status(self.t("status.cancelled"))
+        if not self._close_when_worker_stops:
+            self._show_message_dialog(
+                self.t("dialog.cancelled.title"), self.t("dialog.cancelled.body"),
+            )
+
+    def _on_cancel_stalled(self, message: str) -> None:
+        self._append_log(self.t("log.cancel_stalled", message=message))
+        self._set_status(self.t("status.cancel_stalled"))
+        if not self._close_when_worker_stops:
+            QMessageBox.critical(
+                self,
+                self.t("dialog.error.title"),
+                self.t("dialog.cancel_stalled.body", message=message),
+            )
+
     def _on_worker_stopped(self) -> None:
         self.worker = None
         self.worker_thread = None
         self.current_worker_kind = None
+        self.cancel_button.setEnabled(True)
+        self.cancel_button.setText(self.t("button.cancel"))
         self._update_action_state()
+        if self._close_when_worker_stops:
+            self._close_when_worker_stops = False
+            self.close()
+
+    def cancel_create(self) -> None:
+        if isinstance(self.worker, CreateWorker):
+            self.worker.cancel()
+            self.cancel_button.setEnabled(False)
+            self.cancel_button.setText(self.t("button.cancelling"))
+            self._set_status(self.t("status.cancelling"))
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self.worker_thread is not None and self.worker_thread.isRunning():
+            self._close_when_worker_stops = True
+            if isinstance(self.worker, CreateWorker):
+                self.cancel_create()
+            event.ignore()
+            return
+        event.accept()
 
     def _format_selected_device_display(self, target: str) -> str:
         return self._format_device_display_from_path(target)

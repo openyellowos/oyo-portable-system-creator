@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -40,6 +41,80 @@ class PartitionService:
         boot = f"{device}{suffix}3"
         root = f"{device}{suffix}4"
         return efi, boot, root
+
+    def assert_no_target_residuals(self, device: str) -> None:
+        """Fail closed if the selected physical device still owns active resources."""
+        result = self.runner.run(
+            ["lsblk", "--json", "--paths", "--tree", "--output", "PATH,TYPE,MOUNTPOINTS", device],
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"could not inspect target device {device}")
+        try:
+            inventory = json.loads(result.stdout)
+            roots = inventory["blockdevices"]
+            if not isinstance(roots, list) or len(roots) != 1 or not isinstance(roots[0], dict):
+                raise ValueError("expected exactly one target device")
+            rows: list[tuple[str, str, list[str]]] = []
+
+            def visit(nodes: object) -> None:
+                if not isinstance(nodes, list):
+                    raise ValueError("invalid block-device children")
+                for node in nodes:
+                    if not isinstance(node, dict) or not isinstance(node.get("path"), str):
+                        raise ValueError("invalid block-device row")
+                    mountpoints = node.get("mountpoints") or []
+                    if isinstance(mountpoints, str):
+                        mountpoints = [mountpoints]
+                    if not isinstance(mountpoints, list) or any(not isinstance(item, str) for item in mountpoints):
+                        raise ValueError("invalid block-device mountpoints")
+                    rows.append((node["path"], str(node.get("type") or ""), mountpoints))
+                    children = node.get("children")
+                    if children is not None:
+                        visit(children)
+
+            visit(roots)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"could not parse target device inventory for {device}: {exc}") from exc
+
+        def block_identity(path: str) -> int:
+            info = os.stat(path)
+            if not stat.S_ISBLK(info.st_mode):
+                raise RuntimeError(f"target inventory contains a non-block device: {path}")
+            return info.st_rdev
+
+        requested_identity = block_identity(device)
+        if block_identity(rows[0][0]) != requested_identity:
+            raise RuntimeError(f"target device identity changed during inspection: {device}")
+        target_identities = {block_identity(path) for path, _, _ in rows}
+        residuals: list[str] = []
+        for path, node_type, mountpoints in rows:
+            if node_type.lower() in {"crypt", "swap"}:
+                residuals.append(f"{node_type} mapping {path}")
+            for mountpoint in mountpoints:
+                if mountpoint == "[SWAP]":
+                    residuals.append(f"active swap {path}")
+                elif mountpoint:
+                    residuals.append(f"mount {mountpoint} from {path}")
+
+        # Match /proc/swaps by kernel block identity, not a possibly renamed
+        # /dev path. A failed snapshot is not equivalent to an empty swap table.
+        for swap_path in self._active_swaps():
+            try:
+                swap_info = os.stat(swap_path)
+            except FileNotFoundError:
+                # The path may have been renamed since /proc/swaps was read; the
+                # selected device's lsblk rows above still identify its live nodes.
+                continue
+            if not stat.S_ISBLK(swap_info.st_mode):
+                # Swap files are not block-device identities. If one is on a
+                # mounted target filesystem, that target mount was rejected above.
+                continue
+            swap_identity = swap_info.st_rdev
+            if swap_identity in target_identities:
+                residuals.append(f"active swap {swap_path}")
+        if residuals:
+            raise RuntimeError("target device has active resources: " + "; ".join(dict.fromkeys(residuals)))
 
     def _clear_device_signatures(self, device: str) -> None:
         self.runner.run(["dd", "if=/dev/zero", f"of={device}", "bs=1M", "count=16", "conv=fsync"], check=True)
@@ -255,6 +330,16 @@ class PartitionService:
     def _active_swaps() -> set[str]:
         try:
             lines = Path("/proc/swaps").read_text(encoding="utf-8").splitlines()
-        except OSError:
-            return set()
-        return {line.split()[0] for line in lines[1:] if line.strip()}
+        except OSError as exc:
+            raise RuntimeError(f"could not inspect active swap devices: {exc}") from exc
+        if not lines or not lines[0].startswith("Filename"):
+            raise RuntimeError("malformed /proc/swaps snapshot")
+        swaps: set[str] = set()
+        for line in lines[1:]:
+            if not line.strip():
+                continue
+            fields = line.split()
+            if len(fields) < 5 or not fields[0].startswith("/"):
+                raise RuntimeError("malformed /proc/swaps entry")
+            swaps.add(fields[0])
+        return swaps

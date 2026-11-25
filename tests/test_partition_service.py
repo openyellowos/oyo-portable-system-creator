@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import stat
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -50,6 +52,10 @@ class PartitionServiceTests(unittest.TestCase):
     @staticmethod
     def lsblk_command(device: str = "/dev/fake") -> tuple[str, ...]:
         return ("lsblk", "--json", "--paths", "--output", "PATH,TYPE,MOUNTPOINTS", device)
+
+    @staticmethod
+    def target_inspection_command(device: str = "/dev/fake") -> tuple[str, ...]:
+        return ("lsblk", "--json", "--paths", "--tree", "--output", "PATH,TYPE,MOUNTPOINTS", device)
 
     def test_luks_passphrase_is_written_without_trailing_newline(self) -> None:
         runner = DummyRunner()
@@ -355,6 +361,81 @@ class PartitionServiceTests(unittest.TestCase):
         commands = [call["command"] for call in runner.calls]
         self.assertNotIn(["cryptsetup", "open", "--key-file", "-", "/dev/root", "owned-by-other"], commands)
         self.assertEqual(registered, [])
+
+    def test_target_residual_inspection_accepts_clean_device_by_block_identity(self) -> None:
+        runner = DummyRunner()
+        runner.outputs[self.target_inspection_command()] = (
+            0,
+            self.inventory({"path": "/dev/fake", "type": "disk", "mountpoints": None,
+                            "children": [{"path": "/dev/fake1", "type": "part", "mountpoints": None}]}),
+            "",
+        )
+        service = PartitionService(runner, DummyLogger())
+        identities = {"/dev/fake": 101, "/dev/fake1": 102}
+
+        def fake_stat(path: str):
+            return SimpleNamespace(st_mode=stat.S_IFBLK, st_rdev=identities[path])
+
+        with patch("src.services.partition_service.os.stat", side_effect=fake_stat):
+            with patch.object(PartitionService, "_active_swaps", return_value=set()):
+                service.assert_no_target_residuals("/dev/fake")
+
+    def test_target_residual_mount_stops_without_any_release_command(self) -> None:
+        runner = DummyRunner()
+        runner.outputs[self.target_inspection_command()] = (
+            0,
+            self.inventory({"path": "/dev/fake", "type": "disk", "mountpoints": None,
+                            "children": [{"path": "/dev/fake1", "type": "part", "mountpoints": ["/media/usb"]}]}),
+            "",
+        )
+        service = PartitionService(runner, DummyLogger())
+        identities = {"/dev/fake": 101, "/dev/fake1": 102}
+
+        with patch("src.services.partition_service.os.stat", side_effect=lambda path: SimpleNamespace(
+            st_mode=stat.S_IFBLK, st_rdev=identities[path]
+        )):
+            with patch.object(PartitionService, "_active_swaps", return_value=set()):
+                with self.assertRaisesRegex(RuntimeError, "mount /media/usb"):
+                    service.assert_no_target_residuals("/dev/fake")
+        self.assertEqual(len(runner.calls), 1)
+        self.assertEqual(runner.calls[0]["command"][0], "lsblk")
+
+    def test_target_residual_swap_mapper_and_device_alias_are_detected(self) -> None:
+        runner = DummyRunner()
+        runner.outputs[self.target_inspection_command()] = (
+            0,
+            self.inventory({"path": "/dev/fake", "type": "disk", "mountpoints": None,
+                            "children": [
+                                {"path": "/dev/fake1", "type": "part", "mountpoints": None},
+                                {"path": "/dev/mapper/oyoport-cryptroot", "type": "crypt", "mountpoints": None},
+                            ]}),
+            "",
+        )
+        service = PartitionService(runner, DummyLogger())
+        identities = {"/dev/fake": 101, "/dev/fake1": 102, "/dev/mapper/oyoport-cryptroot": 103}
+        with patch("src.services.partition_service.os.stat", side_effect=lambda path: SimpleNamespace(
+            st_mode=stat.S_IFBLK, st_rdev=identities[path]
+        )):
+            with patch.object(PartitionService, "_active_swaps", return_value={"/dev/fake1"}):
+                with self.assertRaisesRegex(RuntimeError, "crypt mapping.*active swap"):
+                    service.assert_no_target_residuals("/dev/fake")
+
+        identities["/dev/alias"] = 101
+        identities["/dev/fake"] = 999
+        runner.outputs[self.target_inspection_command("/dev/alias")] = runner.outputs[self.target_inspection_command()]
+        with patch("src.services.partition_service.os.stat", side_effect=lambda path: SimpleNamespace(
+            st_mode=stat.S_IFBLK, st_rdev=identities[path]
+        )):
+            with patch.object(PartitionService, "_active_swaps", return_value=set()):
+                with self.assertRaisesRegex(RuntimeError, "identity changed"):
+                    service.assert_no_target_residuals("/dev/alias")
+
+    def test_target_resource_snapshot_failures_stop(self) -> None:
+        runner = DummyRunner()
+        runner.outputs[self.target_inspection_command()] = (0, "not-json", "")
+        service = PartitionService(runner, DummyLogger())
+        with self.assertRaisesRegex(RuntimeError, "could not parse target device inventory"):
+            service.assert_no_target_residuals("/dev/fake")
 
 
 if __name__ == "__main__":
