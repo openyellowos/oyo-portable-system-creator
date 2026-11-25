@@ -204,7 +204,8 @@ class PartitionServiceTests(unittest.TestCase):
         runner = DummyRunner()
         service = PartitionService(runner, DummyLogger())
         identity = {"major": 0, "minor": 101, "diskseq": 7}
-        with patch.object(service, "assert_no_target_residuals") as inspect, \
+        with patch.object(service, "assert_no_target_residuals", return_value=identity) as inspect, \
+             patch.object(service, "_block_identity", return_value=identity), \
              patch.object(service, "unmount_device") as unmount:
             service.prepare_device("/dev/fake", expected_identity=identity)
         inspect.assert_called_once_with("/dev/fake", expected_identity=identity)
@@ -246,6 +247,36 @@ class PartitionServiceTests(unittest.TestCase):
         with patch("src.services.partition_service.os.stat", side_effect=fake_stat):
             with patch.object(PartitionService, "_active_swaps", return_value=set()):
                 service.assert_no_target_residuals("/dev/fake")
+
+    def test_target_inventory_rejects_last_observed_diskseq_change(self) -> None:
+        runner = DummyRunner()
+        runner.outputs[self.target_inspection_command()] = (
+            0,
+            self.inventory({"path": "/dev/fake", "type": "disk", "mountpoints": None}),
+            "",
+        )
+        service = PartitionService(runner, DummyLogger())
+        with patch("src.services.partition_service.os.stat", return_value=SimpleNamespace(
+            st_mode=stat.S_IFBLK, st_rdev=101
+        )), patch("pathlib.Path.read_text", side_effect=["7\n", "7\n", "8\n"]):
+            with self.assertRaisesRegex(RuntimeError, "identity changed during inspection"):
+                service.assert_no_target_residuals(
+                    "/dev/fake", expected_identity={"major": 0, "minor": 101, "diskseq": 7}
+                )
+        self.assertEqual(len(runner.calls), 1)
+
+    def test_prepare_device_rechecks_full_identity_immediately_before_writes(self) -> None:
+        runner = DummyRunner()
+        service = PartitionService(runner, DummyLogger())
+        verified = {"major": 0, "minor": 101, "diskseq": 7}
+        replaced = {"major": 0, "minor": 101, "diskseq": 8}
+        with patch.object(service, "assert_no_target_residuals", return_value=verified), \
+             patch.object(service, "_block_identity", return_value=replaced):
+            with self.assertRaisesRegex(AppError, "changed before preparation"):
+                service.prepare_device("/dev/fake", expected_identity=verified)
+        commands = [call["command"][0] for call in runner.calls]
+        self.assertNotIn("dd", commands)
+        self.assertNotIn("parted", commands)
 
     def test_target_residual_mount_stops_without_any_release_command(self) -> None:
         runner = DummyRunner()

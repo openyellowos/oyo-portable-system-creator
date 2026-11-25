@@ -81,6 +81,19 @@ class CommandRunner:
                         input=input_text if first_communicate else None,
                         timeout=0.2,
                     )
+                    # communicate() may finish when the leader exits even if a
+                    # descendant closed its inherited pipes. Cancellation can
+                    # arrive while communicate() is blocked.
+                    if not self._ignore_cancel and self.cancel_event is not None and self.cancel_event.is_set():
+                        self._terminate_and_reap(process)
+                        raise AppError.translated("E123", "error.operation_cancelled")
+                    # Keep ownership of the process group through completion:
+                    # a descendant may outlive the command leader and continue
+                    # writing to the target during later workflow phases.
+                    if self._process_group_alive(process.pid):
+                        completed = self._terminate_and_reap(process)
+                    if not self._ignore_cancel and self.cancel_event is not None and self.cancel_event.is_set():
+                        raise AppError.translated("E123", "error.operation_cancelled")
                     break
                 except subprocess.TimeoutExpired:
                     first_communicate = False

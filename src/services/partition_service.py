@@ -29,7 +29,21 @@ class PartitionService:
             # Never adopt or release resources that appeared after precheck.
             # Re-inspect at the destructive boundary and fail closed instead.
             try:
-                self.assert_no_target_residuals(device, expected_identity=expected_identity)
+                verified_identity = self.assert_no_target_residuals(
+                    device, expected_identity=expected_identity
+                )
+                # Older test doubles and compatible overrides may not return
+                # the snapshot. In production the inspection returns it; an
+                # explicit precheck identity is the only safe fallback.
+                if not isinstance(verified_identity, dict):
+                    verified_identity = expected_identity
+                if not isinstance(verified_identity, dict):
+                    raise RuntimeError("target identity snapshot unavailable before preparation")
+                final_identity = self._block_identity(device)
+                if not self._same_identity(final_identity, verified_identity):
+                    raise RuntimeError(f"target device identity changed before preparation: {device}")
+                if expected_identity is not None and not self._same_identity(final_identity, expected_identity):
+                    raise RuntimeError(f"target device identity changed since validation: {device}")
             except AppError:
                 raise
             except Exception as exc:
@@ -60,7 +74,7 @@ class PartitionService:
         device: str,
         *,
         expected_identity: dict[str, int | None] | None = None,
-    ) -> None:
+    ) -> dict[str, int | None]:
         """Fail closed if the selected physical device still owns active resources."""
         requested_before = self._block_identity(device)
         if expected_identity is not None and not self._same_identity(requested_before, expected_identity):
@@ -116,9 +130,11 @@ class PartitionService:
         if not rows or rows[0][3] != self._majmin(requested_after):
             raise RuntimeError(f"target inventory identity does not match selected device: {device}")
         target_identities: set[int] = set()
-        for path, _, _, inventory_majmin in rows:
+        for index, (path, _, _, inventory_majmin) in enumerate(rows):
             identity = self._block_identity(path)
             if self._majmin(identity) != inventory_majmin:
+                raise RuntimeError(f"target inventory identity changed during inspection: {path}")
+            if index == 0 and not self._same_identity(identity, expected_identity or requested_after):
                 raise RuntimeError(f"target inventory identity changed during inspection: {path}")
             target_identities.add(os.makedev(identity["major"], identity["minor"]))
         residuals: list[str] = []
@@ -149,6 +165,7 @@ class PartitionService:
                 residuals.append(f"active swap {swap_path}")
         if residuals:
             raise RuntimeError("target device has active resources: " + "; ".join(dict.fromkeys(residuals)))
+        return requested_after
 
     @staticmethod
     def _majmin(identity: dict[str, int | None]) -> str:

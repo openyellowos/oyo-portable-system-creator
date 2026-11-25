@@ -128,6 +128,69 @@ class CommandRunnerTests(unittest.TestCase):
         self.assertEqual(outcome[0].code, "E123")  # type: ignore[union-attr]
         self.assertFalse(self._pid_is_running(child_pid), "descendant must not survive into workflow cleanup")
 
+    def test_cancellation_during_communicate_stops_descendant_after_leader_exits(self) -> None:
+        cancel_event = threading.Event()
+        runner = CommandRunner(DummyLogger(), cancel_event=cancel_event)
+        runner.TERMINATION_GRACE_SECONDS = 0.25
+        outcome: list[BaseException] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pid_file = Path(tmpdir) / "child.pid"
+            child_code = (
+                "import os, signal, time; "
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                f"open({str(pid_file)!r}, 'w').write(str(os.getpid())); "
+                "os.close(1); os.close(2); time.sleep(30)"
+            )
+            parent_code = (
+                "import subprocess, sys, time; "
+                f"subprocess.Popen([sys.executable, '-c', {child_code!r}]); "
+                "time.sleep(0.35)"
+            )
+
+            def run_command() -> None:
+                try:
+                    runner.run([sys.executable, "-c", parent_code])
+                except BaseException as exc:
+                    outcome.append(exc)
+
+            thread = threading.Thread(target=run_command)
+            thread.start()
+            deadline = time.monotonic() + 5
+            while not pid_file.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(pid_file.exists(), "descendant did not start")
+            child_pid = int(pid_file.read_text(encoding="ascii"))
+            cancel_event.set()
+            thread.join(4)
+
+        self.assertFalse(thread.is_alive(), "cancellation must be rechecked after communicate returns")
+        self.assertEqual(len(outcome), 1)
+        self.assertIsInstance(outcome[0], AppError)
+        self.assertEqual(outcome[0].code, "E123")  # type: ignore[union-attr]
+        self.assertFalse(self._pid_is_running(child_pid), "descendant must not survive cancellation")
+
+    def test_normal_completion_reaps_descendant_that_closed_pipes(self) -> None:
+        runner = CommandRunner(DummyLogger())
+        runner.TERMINATION_GRACE_SECONDS = 0.25
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pid_file = Path(tmpdir) / "child.pid"
+            child_code = (
+                "import os, signal, time; "
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                f"open({str(pid_file)!r}, 'w').write(str(os.getpid())); "
+                "os.close(1); os.close(2); time.sleep(30)"
+            )
+            parent_code = (
+                "import subprocess, sys, time; "
+                f"subprocess.Popen([sys.executable, '-c', {child_code!r}]); "
+                "time.sleep(0.15)"
+            )
+            result = runner.run([sys.executable, "-c", parent_code])
+            child_pid = int(pid_file.read_text(encoding="ascii"))
+
+        self.assertEqual(result.returncode, 0)
+        self.assertFalse(self._pid_is_running(child_pid), "same-group descendant must not outlive command")
+
     @staticmethod
     def _pid_is_running(pid: int) -> bool:
         try:
