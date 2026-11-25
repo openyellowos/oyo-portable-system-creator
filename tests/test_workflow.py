@@ -276,6 +276,24 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "E124")
         self.assertEqual(self.partition_service.calls, [])
 
+    def test_operation_lock_remains_held_through_cleanup_and_releases_afterward(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lock_path = Path(tmpdir) / "operation.lock"
+            self.workflow.operation_lock_factory = lambda: OperationLock(lock_path)
+            cleanup = self.workflow.cleanup
+
+            def assert_locked_during_cleanup(state: ExecutionState) -> None:
+                with self.assertRaises(AppError) as raised:
+                    with OperationLock(lock_path):
+                        self.fail("lock was released before cleanup")
+                self.assertEqual(raised.exception.code, "E124")
+                cleanup(state)
+
+            self.workflow.cleanup = assert_locked_during_cleanup  # type: ignore[method-assign]
+            self.workflow.run_create(ExecutionState(mode="create", target_device="/dev/sdz"))
+            with OperationLock(lock_path):
+                pass
+
     def test_cancel_after_mount_attempt_runs_cleanup_before_inhibitor_release(self) -> None:
         events: list[str] = []
 
