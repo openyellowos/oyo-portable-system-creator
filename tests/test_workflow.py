@@ -104,6 +104,9 @@ class DummyDeviceService:
     def validate_target_device(self, target_device: str) -> None:
         return None
 
+    def target_device_identity(self, target_device: str) -> dict[str, int | None]:
+        return {"major": 0, "minor": 101, "diskseq": 7}
+
     def estimate_required_bytes(self, copy_bytes: int) -> int:
         return copy_bytes
 
@@ -115,8 +118,15 @@ class DummyPartitionService:
     def __init__(self, work_root: Path) -> None:
         self.work_root = work_root
         self.calls: list[tuple[str, str]] = []
+        self.expected_identity: dict[str, int | None] | None = None
 
-    def prepare_device(self, target_device: str) -> tuple[str, str, str]:
+    def prepare_device(
+        self,
+        target_device: str,
+        *,
+        expected_identity: dict[str, int | None] | None = None,
+    ) -> tuple[str, str, str]:
+        self.expected_identity = expected_identity
         return ("/dev/fake-efi", "/dev/fake-boot", "/dev/fake-root")
 
     def make_filesystems_and_mount(self, efi: str, boot: str, root: str, workdir: Path, **_: object) -> Path:
@@ -209,13 +219,20 @@ class WorkflowTests(unittest.TestCase):
         self.workflow.precheck = lambda state: events.append("precheck")  # type: ignore[method-assign]
         prepare_device = self.partition_service.prepare_device
 
-        def record_prepare(target_device: str) -> tuple[str, str, str]:
+        def record_prepare(target_device: str, **kwargs: object) -> tuple[str, str, str]:
             events.append("prepare")
-            return prepare_device(target_device)
+            return prepare_device(target_device, **kwargs)
 
         self.partition_service.prepare_device = record_prepare  # type: ignore[method-assign]
         self.workflow.run_create(ExecutionState(mode="create", target_device="/dev/sdz"))
         self.assertEqual(events, ["precheck", "prepare"])
+
+    def test_precheck_identity_is_carried_to_destructive_boundary(self) -> None:
+        state = ExecutionState(mode="create", target_device="/dev/sdz")
+        self.workflow.run_create(state)
+        expected = {"major": 0, "minor": 101, "diskseq": 7}
+        self.assertEqual(state.metadata["_target_device_identity"], expected)
+        self.assertEqual(self.partition_service.expected_identity, expected)
 
     def test_run_create_runs_rsync_twice(self) -> None:
         state = ExecutionState(mode="create", target_device="/dev/sdz")
@@ -247,6 +264,24 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "E125")
         self.assertEqual(self.partition_service.calls, [])
 
+    def test_late_target_mount_blocks_at_destructive_boundary(self) -> None:
+        self.workflow.precheck = lambda _state: None  # type: ignore[method-assign]
+        inspection_count = 0
+
+        def inspect_target(_device: str, *, expected_identity=None) -> None:
+            nonlocal inspection_count
+            inspection_count += 1
+            if inspection_count == 2:
+                raise RuntimeError("late mount appeared")
+
+        self.partition_service.assert_no_target_residuals = inspect_target  # type: ignore[attr-defined,method-assign]
+        with patch.object(self.partition_service, "prepare_device") as prepare:
+            with self.assertRaises(AppError) as raised:
+                self.workflow.run_create(ExecutionState(mode="create", target_device="/dev/sdz"))
+        self.assertEqual(raised.exception.code, "E125")
+        self.assertEqual(inspection_count, 2)
+        prepare.assert_not_called()
+
     def test_mountinfo_read_failure_blocks_before_device_preparation(self) -> None:
         self.workflow.precheck = lambda _state: None  # type: ignore[method-assign]
         with patch.object(self.workflow, "_stale_work_mounts", side_effect=OSError("mountinfo unavailable")):
@@ -258,11 +293,21 @@ class WorkflowTests(unittest.TestCase):
     def test_stale_mount_scanner_matches_bind_mounts_under_workdir_prefix(self) -> None:
         with patch(
             "src.core.workflow.read_mountinfo_entries",
-            return_value=[("/var/tmp/oyo-portable-a1B2c3D4/root/dev", "/dev/other-usb3")],
+            return_value=[("/var/tmp/oyo-portable-a1b2c3d4/root/dev", "/dev/other-usb3")],
         ):
             self.assertEqual(
                 self.workflow._stale_work_mounts(),
-                ["/var/tmp/oyo-portable-a1B2c3D4/root/dev"],
+                ["/var/tmp/oyo-portable-a1b2c3d4/root/dev"],
+            )
+
+    def test_stale_mount_scanner_matches_tempfile_suffix_with_underscore(self) -> None:
+        with patch(
+            "src.core.workflow.read_mountinfo_entries",
+            return_value=[("/old-tmp/oyo-portable-ab_cd123/root/dev", "/dev/other-usb3")],
+        ):
+            self.assertEqual(
+                self.workflow._stale_work_mounts(),
+                ["/old-tmp/oyo-portable-ab_cd123/root/dev"],
             )
 
     def test_lock_contention_fails_before_precheck_or_device_mutation(self) -> None:

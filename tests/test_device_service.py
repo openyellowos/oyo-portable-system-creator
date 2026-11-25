@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+import stat
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from src.core.errors import AppError
@@ -47,6 +49,23 @@ class DeviceServiceTests(unittest.TestCase):
 
     def test_check_os_does_not_require_openyellow(self) -> None:
         self.service.check_os()
+
+    def test_target_device_identity_captures_block_number_and_diskseq(self) -> None:
+        with patch("src.services.device_service.os.stat", return_value=SimpleNamespace(
+            st_mode=stat.S_IFBLK, st_rdev=123
+        )), patch("pathlib.Path.read_text", autospec=True, return_value="456\n") as read_text:
+            identity = self.service.target_device_identity("/dev/sdz")
+
+        self.assertEqual(identity, {"major": 0, "minor": 123, "diskseq": 456})
+        self.assertTrue(str(read_text.call_args.args[0]).endswith("0:123/diskseq"))
+
+    def test_target_device_identity_rejects_regular_file(self) -> None:
+        with patch("src.services.device_service.os.stat", return_value=SimpleNamespace(
+            st_mode=stat.S_IFREG, st_rdev=123
+        )):
+            with self.assertRaises(AppError) as raised:
+                self.service.target_device_identity("/dev/sdz")
+        self.assertEqual(raised.exception.code, "E201")
 
     def test_check_required_commands_requires_dd_and_udevadm(self) -> None:
         for missing_command in ("dd", "udevadm"):

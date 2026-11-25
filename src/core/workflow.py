@@ -55,6 +55,9 @@ class Workflow:
         if not state.target_device:
             raise AppError.translated("E201", "error.target_required")
         self.device_service.validate_target_device(state.target_device)
+        identity_reader = getattr(self.device_service, "target_device_identity", None)
+        if identity_reader is not None:
+            state.metadata["_target_device_identity"] = identity_reader(state.target_device)
         source_path = self.copy_service.resolve_source(state.mode, state.source_device)
         state.metadata["source_path"] = source_path
         copy_bytes = self.copy_service.estimate_copy_bytes(source_path, state.mode)
@@ -76,7 +79,9 @@ class Workflow:
             self.precheck(state)
             self._check_cancelled()
             self._assert_no_stale_work_mounts()
-            self._assert_no_target_residuals(state.target_device or "")
+            self._assert_no_target_residuals(
+                state.target_device or "", state.metadata.get("_target_device_identity")
+            )
             if bool(state.options.get("encryption_enabled")):
                 mapper_name = str(state.options.get("luks_mapper_name") or "oyoport-cryptroot")
                 self._assert_mapper_available(mapper_name)
@@ -91,8 +96,12 @@ class Workflow:
             completed = False
             try:
                 self._check_cancelled()
+                target_identity = state.metadata.get("_target_device_identity")
+                self._assert_no_target_residuals(state.target_device or "", target_identity)
                 self._update_progress(state, 20, self.translate("workflow.partition.create"))
-                efi, boot, root = self.partition_service.prepare_device(state.target_device or "")
+                efi, boot, root = self.partition_service.prepare_device(
+                    state.target_device or "", expected_identity=target_identity
+                )
                 self._check_cancelled()
                 self._update_progress(state, 30, self.translate("workflow.fs.mount"))
                 encryption_enabled = bool(state.options.get("encryption_enabled"))
@@ -210,12 +219,16 @@ class Workflow:
         if checker is not None:
             checker()
 
-    def _assert_no_target_residuals(self, device: str) -> None:
+    def _assert_no_target_residuals(
+        self,
+        device: str,
+        expected_identity: dict[str, int | None] | None = None,
+    ) -> None:
         inspector = getattr(self.partition_service, "assert_no_target_residuals", None)
         if inspector is None:
             return
         try:
-            inspector(device)
+            inspector(device, expected_identity=expected_identity)
         except AppError:
             raise
         except Exception as exc:
@@ -239,8 +252,7 @@ class Workflow:
             return (
                 part.startswith("oyo-portable-")
                 and len(suffix) == 8
-                and suffix.isascii()
-                and suffix.isalnum()
+                and all(char in "abcdefghijklmnopqrstuvwxyz0123456789_" for char in suffix)
             )
 
         stale: list[str] = []

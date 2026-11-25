@@ -9,6 +9,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from collections.abc import Callable, Iterator
+from pathlib import Path
 
 from src.core.errors import AppError
 from src.infra.logger import AppLogger
@@ -23,6 +24,8 @@ class CommandResult:
 
 
 class CommandRunner:
+    TERMINATION_GRACE_SECONDS = 3.0
+
     def __init__(
         self,
         logger: AppLogger,
@@ -102,8 +105,6 @@ class CommandRunner:
 
     def _terminate_and_reap(self, process: subprocess.Popen[str]) -> tuple[str, str]:
         """Stop the full command session and reap it before workflow cleanup starts."""
-        if process.poll() is not None:
-            return process.communicate()
         stalled_notified = False
 
         def notify_stalled(reason: str) -> None:
@@ -118,38 +119,83 @@ class CommandRunner:
                 except Exception:
                     pass
 
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        except OSError as exc:
-            notify_stalled(f"Could not send SIGTERM to command {process.pid}: {exc}; waiting before cleanup.")
-        try:
-            return process.communicate(timeout=3)
-        except subprocess.TimeoutExpired:
+        def signal_group(sig: int, label: str) -> None:
             try:
-                os.killpg(process.pid, signal.SIGKILL)
+                os.killpg(process.pid, sig)
             except ProcessLookupError:
                 pass
             except OSError as exc:
-                notify_stalled(f"Could not send SIGKILL to command {process.pid}: {exc}; cleanup remains blocked.")
-        # Keep the workflow lock and inhibitor held while the killed child is
-        # still present (including transient uninterruptible kernel waits).
-        kill_sent_at = time.monotonic()
+                notify_stalled(f"Could not send {label} to command group {process.pid}: {exc}; cleanup remains blocked.")
+
+        # Always address the process group, even if the command leader exited
+        # first. Descendants may have closed inherited pipes but still be alive.
+        signal_group(signal.SIGTERM, "SIGTERM")
+        started_at = time.monotonic()
+        kill_sent = False
+        kill_started_at = 0.0
+        last_kill_at = 0.0
         while True:
             try:
-                return process.communicate(timeout=0.5)
+                output = process.communicate(timeout=0.2)
             except subprocess.TimeoutExpired:
-                if not stalled_notified and time.monotonic() - kill_sent_at >= 5:
-                    notify_stalled(
-                        f"Command {process.pid} is still running after SIGKILL; keeping the operation lock and suspend inhibitor, and not starting cleanup."
-                    )
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                except OSError as exc:
-                    notify_stalled(f"Could not stop command {process.pid}: {exc}; cleanup remains blocked.")
+                output = None
+
+            group_alive = self._process_group_alive(process.pid)
+            if output is not None and not group_alive:
+                return output
+
+            elapsed = time.monotonic() - started_at
+            if not kill_sent and elapsed >= self.TERMINATION_GRACE_SECONDS:
+                signal_group(signal.SIGKILL, "SIGKILL")
+                kill_sent = True
+                kill_started_at = time.monotonic()
+                last_kill_at = time.monotonic()
+            elif kill_sent and group_alive and time.monotonic() - last_kill_at >= 0.5:
+                # Repeat in case a member entered a transient uninterruptible
+                # wait while the previous signal was pending.
+                signal_group(signal.SIGKILL, "SIGKILL")
+                last_kill_at = time.monotonic()
+
+            if kill_sent and not stalled_notified and time.monotonic() - kill_started_at >= 5:
+                notify_stalled(
+                    f"Command group {process.pid} is still running after SIGKILL; keeping the operation lock and suspend inhibitor, and not starting cleanup."
+                )
+            if output is not None:
+                time.sleep(0.1)
+
+    @staticmethod
+    def _process_group_alive(process_group_id: int) -> bool:
+        """Check for executable members, excluding zombies that cannot do work."""
+        try:
+            os.killpg(process_group_id, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        proc = Path("/proc")
+        if not proc.is_dir():
+            return True
+        observed_member = False
+        try:
+            entries = list(proc.iterdir())
+        except OSError:
+            return True
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            try:
+                contents = (entry / "stat").read_text(encoding="ascii")
+                end = contents.rfind(")")
+                fields = contents[end + 2 :].split()
+                state, group_id = fields[0], int(fields[2])
+            except (OSError, ValueError, IndexError):
+                continue
+            if group_id == process_group_id:
+                observed_member = True
+                if state not in {"Z", "X"}:
+                    return True
+        # If /proc hides the group, don't mistake lack of visibility for exit.
+        return not observed_member
 
     @staticmethod
     def _masked(command: list[str], masks: list[str]) -> list[str]:

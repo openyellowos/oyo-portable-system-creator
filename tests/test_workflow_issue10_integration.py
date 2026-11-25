@@ -67,7 +67,7 @@ class DummyPartitionService:
         self.work_root = work_root
         self.calls: list[tuple[str, str]] = []
 
-    def prepare_device(self, target_device: str) -> tuple[str, str, str]:
+    def prepare_device(self, target_device: str, **_: object) -> tuple[str, str, str]:
         return ("/dev/fake-efi", "/dev/fake-boot", "/dev/fake-root")
 
     def make_filesystems_and_mount(self, efi: str, boot: str, root: str, workdir: Path, **_: object) -> Path:

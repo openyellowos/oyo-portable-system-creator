@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import time
 from collections.abc import Callable
@@ -18,9 +19,21 @@ class PartitionService:
         self.runner = runner
         self.logger = logger
 
-    def prepare_device(self, device: str) -> tuple[str, str, str]:
+    def prepare_device(
+        self,
+        device: str,
+        *,
+        expected_identity: dict[str, int | None] | None = None,
+    ) -> tuple[str, str, str]:
         try:
-            self.unmount_device(device)
+            # Never adopt or release resources that appeared after precheck.
+            # Re-inspect at the destructive boundary and fail closed instead.
+            try:
+                self.assert_no_target_residuals(device, expected_identity=expected_identity)
+            except AppError:
+                raise
+            except Exception as exc:
+                raise AppError.translated("E125", "error.residual_resources", reason=str(exc)) from exc
             self._clear_device_signatures(device)
             self.runner.run(["parted", "-s", device, "mklabel", "gpt"])
             self.runner.run(["parted", "-s", device, "mkpart", "BIOSBOOT", "1MiB", "3MiB"])
@@ -42,10 +55,18 @@ class PartitionService:
         root = f"{device}{suffix}4"
         return efi, boot, root
 
-    def assert_no_target_residuals(self, device: str) -> None:
+    def assert_no_target_residuals(
+        self,
+        device: str,
+        *,
+        expected_identity: dict[str, int | None] | None = None,
+    ) -> None:
         """Fail closed if the selected physical device still owns active resources."""
+        requested_before = self._block_identity(device)
+        if expected_identity is not None and not self._same_identity(requested_before, expected_identity):
+            raise RuntimeError(f"target device identity changed since validation: {device}")
         result = self.runner.run(
-            ["lsblk", "--json", "--paths", "--tree", "--output", "PATH,TYPE,MOUNTPOINTS", device],
+            ["lsblk", "--json", "--paths", "--tree", "--output", "PATH,TYPE,MOUNTPOINTS,MAJ:MIN", device],
             check=False,
         )
         if result.returncode != 0:
@@ -55,7 +76,7 @@ class PartitionService:
             roots = inventory["blockdevices"]
             if not isinstance(roots, list) or len(roots) != 1 or not isinstance(roots[0], dict):
                 raise ValueError("expected exactly one target device")
-            rows: list[tuple[str, str, list[str]]] = []
+            rows: list[tuple[str, str, list[str], str]] = []
 
             def visit(nodes: object) -> None:
                 if not isinstance(nodes, list):
@@ -67,6 +88,8 @@ class PartitionService:
                         or not node["path"].startswith("/dev/")
                         or not isinstance(node.get("type"), str)
                         or not node["type"]
+                        or not isinstance(node.get("maj:min"), str)
+                        or not re.fullmatch(r"[0-9]+:[0-9]+", node["maj:min"])
                     ):
                         raise ValueError("invalid block-device row")
                     mountpoints = node.get("mountpoints") or []
@@ -76,7 +99,7 @@ class PartitionService:
                         item is not None and not isinstance(item, str) for item in mountpoints
                     ):
                         raise ValueError("invalid block-device mountpoints")
-                    rows.append((node["path"], node["type"], [item for item in mountpoints if item]))
+                    rows.append((node["path"], node["type"], [item for item in mountpoints if item], node["maj:min"]))
                     children = node.get("children")
                     if children is not None:
                         visit(children)
@@ -85,18 +108,21 @@ class PartitionService:
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise RuntimeError(f"could not parse target device inventory for {device}: {exc}") from exc
 
-        def block_identity(path: str) -> int:
-            info = os.stat(path)
-            if not stat.S_ISBLK(info.st_mode):
-                raise RuntimeError(f"target inventory contains a non-block device: {path}")
-            return info.st_rdev
-
-        requested_identity = block_identity(device)
-        if block_identity(rows[0][0]) != requested_identity:
+        requested_after = self._block_identity(device)
+        if not self._same_identity(requested_before, requested_after):
             raise RuntimeError(f"target device identity changed during inspection: {device}")
-        target_identities = {block_identity(path) for path, _, _ in rows}
+        if expected_identity is not None and not self._same_identity(requested_after, expected_identity):
+            raise RuntimeError(f"target device identity changed since validation: {device}")
+        if not rows or rows[0][3] != self._majmin(requested_after):
+            raise RuntimeError(f"target inventory identity does not match selected device: {device}")
+        target_identities: set[int] = set()
+        for path, _, _, inventory_majmin in rows:
+            identity = self._block_identity(path)
+            if self._majmin(identity) != inventory_majmin:
+                raise RuntimeError(f"target inventory identity changed during inspection: {path}")
+            target_identities.add(os.makedev(identity["major"], identity["minor"]))
         residuals: list[str] = []
-        for path, node_type, mountpoints in rows:
+        for path, node_type, mountpoints, _ in rows:
             if node_type.lower() in {"crypt", "swap"}:
                 residuals.append(f"{node_type} mapping {path}")
             for mountpoint in mountpoints:
@@ -123,6 +149,33 @@ class PartitionService:
                 residuals.append(f"active swap {swap_path}")
         if residuals:
             raise RuntimeError("target device has active resources: " + "; ".join(dict.fromkeys(residuals)))
+
+    @staticmethod
+    def _majmin(identity: dict[str, int | None]) -> str:
+        return f"{identity['major']}:{identity['minor']}"
+
+    @staticmethod
+    def _same_identity(left: dict[str, int | None], right: dict[str, int | None]) -> bool:
+        if left.get("major") != right.get("major") or left.get("minor") != right.get("minor"):
+            return False
+        expected_diskseq = right.get("diskseq")
+        return expected_diskseq is None or left.get("diskseq") == expected_diskseq
+
+    @staticmethod
+    def _block_identity(path: str) -> dict[str, int | None]:
+        info = os.stat(path)
+        if not stat.S_ISBLK(info.st_mode):
+            raise RuntimeError(f"target inventory contains a non-block device: {path}")
+        major, minor = os.major(info.st_rdev), os.minor(info.st_rdev)
+        diskseq: int | None = None
+        diskseq_path = Path("/sys/dev/block") / f"{major}:{minor}" / "diskseq"
+        try:
+            diskseq = int(diskseq_path.read_text(encoding="ascii").strip())
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"could not read {diskseq_path}: {exc}") from exc
+        return {"major": major, "minor": minor, "diskseq": diskseq}
 
     def assert_mapper_available(self, mapper_name: str) -> None:
         """Do not format a target if the requested mapper name is already active."""

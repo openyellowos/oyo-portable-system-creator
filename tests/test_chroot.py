@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 
 from src.core.errors import AppError
@@ -36,6 +37,31 @@ class FakeRunner:
 
 
 class ChrootBindReleaseTests(unittest.TestCase):
+    def test_cancelled_chroot_releases_binds_and_preserves_e123(self) -> None:
+        class CancelRunner(FakeRunner):
+            cleanup_allowed = False
+
+            @contextmanager
+            def allow_cleanup_after_cancel(self):
+                self.cleanup_allowed = True
+                try:
+                    yield
+                finally:
+                    self.cleanup_allowed = False
+
+            def run(self, command: list[str], *, check: bool = True) -> FakeResult:
+                if command[0] == "chroot":
+                    raise AppError.translated("E123", "error.operation_cancelled")
+                if command[0] == "umount" and not self.cleanup_allowed:
+                    raise AppError.translated("E123", "error.operation_cancelled")
+                return super().run(command, check=check)
+
+        runner = CancelRunner()
+        with self.assertRaises(AppError) as found:
+            ChrootHelper(runner).run_in_chroot(Path("/fake/root"), ["true"])
+        self.assertEqual(found.exception.code, "E123")
+        self.assertEqual(runner.unmount_count, 4)
+
     def test_failed_bind_release_reports_e699(self) -> None:
         runner = FakeRunner(failed_unmount=True)
         with self.assertRaises(AppError) as found:
