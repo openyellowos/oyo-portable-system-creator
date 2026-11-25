@@ -77,6 +77,9 @@ class Workflow:
             self._check_cancelled()
             self._assert_no_stale_work_mounts()
             self._assert_no_target_residuals(state.target_device or "")
+            if bool(state.options.get("encryption_enabled")):
+                mapper_name = str(state.options.get("luks_mapper_name") or "oyoport-cryptroot")
+                self._assert_mapper_available(mapper_name)
             self._update_progress(state, 15, self.translate("workflow.precheck.done"))
             return self._run_after_precheck(state, mode)
 
@@ -218,23 +221,35 @@ class Workflow:
         except Exception as exc:
             raise AppError.translated("E125", "error.residual_resources", reason=str(exc)) from exc
 
+    def _assert_mapper_available(self, mapper_name: str) -> None:
+        inspector = getattr(self.partition_service, "assert_mapper_available", None)
+        if inspector is None:
+            return
+        try:
+            inspector(mapper_name)
+        except AppError:
+            raise
+        except Exception as exc:
+            raise AppError.translated("E125", "error.residual_resources", reason=str(exc)) from exc
+
     @staticmethod
     def _stale_work_mounts() -> list[str]:
-        roots = {tempfile.gettempdir(), "/tmp", "/var/tmp"}
-        roots |= {os.path.realpath(root) for root in roots}
-        normalized_roots = {os.path.normpath(root) for root in roots}
+        def is_workdir_component(part: str) -> bool:
+            suffix = part.removeprefix("oyo-portable-")
+            return (
+                part.startswith("oyo-portable-")
+                and len(suffix) == 8
+                and suffix.isascii()
+                and suffix.isalnum()
+            )
+
         stale: list[str] = []
         for mountpoint, _source in read_mountinfo_entries():
             candidate = os.path.normpath(mountpoint)
-            for root in normalized_roots:
-                try:
-                    relative = os.path.relpath(candidate, root)
-                except ValueError:
-                    continue
-                parts = Path(relative).parts
-                if parts and parts[0].startswith("oyo-portable-"):
-                    stale.append(candidate)
-                    break
+            # Match the eight-character tempfile suffix anywhere so the scan
+            # also catches a previous run that used a different TMPDIR.
+            if any(is_workdir_component(part) for part in Path(candidate).parts):
+                stale.append(candidate)
         return sorted(set(stale))
 
     def _assert_no_stale_work_mounts(self) -> None:

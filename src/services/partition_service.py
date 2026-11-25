@@ -61,14 +61,22 @@ class PartitionService:
                 if not isinstance(nodes, list):
                     raise ValueError("invalid block-device children")
                 for node in nodes:
-                    if not isinstance(node, dict) or not isinstance(node.get("path"), str):
+                    if (
+                        not isinstance(node, dict)
+                        or not isinstance(node.get("path"), str)
+                        or not node["path"].startswith("/dev/")
+                        or not isinstance(node.get("type"), str)
+                        or not node["type"]
+                    ):
                         raise ValueError("invalid block-device row")
                     mountpoints = node.get("mountpoints") or []
                     if isinstance(mountpoints, str):
                         mountpoints = [mountpoints]
-                    if not isinstance(mountpoints, list) or any(not isinstance(item, str) for item in mountpoints):
+                    if not isinstance(mountpoints, list) or any(
+                        item is not None and not isinstance(item, str) for item in mountpoints
+                    ):
                         raise ValueError("invalid block-device mountpoints")
-                    rows.append((node["path"], str(node.get("type") or ""), mountpoints))
+                    rows.append((node["path"], node["type"], [item for item in mountpoints if item]))
                     children = node.get("children")
                     if children is not None:
                         visit(children)
@@ -115,6 +123,12 @@ class PartitionService:
                 residuals.append(f"active swap {swap_path}")
         if residuals:
             raise RuntimeError("target device has active resources: " + "; ".join(dict.fromkeys(residuals)))
+
+    def assert_mapper_available(self, mapper_name: str) -> None:
+        """Do not format a target if the requested mapper name is already active."""
+        backing = self.mapper_backing_device(mapper_name)
+        if backing is not None:
+            raise RuntimeError(f"LUKS mapper {mapper_name} is already active on {backing}")
 
     def _clear_device_signatures(self, device: str) -> None:
         self.runner.run(["dd", "if=/dev/zero", f"of={device}", "bs=1M", "count=16", "conv=fsync"], check=True)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
@@ -169,6 +170,7 @@ class WorkflowTests(unittest.TestCase):
             DummyFirstbootService(),
             self.logger,
             suspend_inhibitor_factory=lambda: DummyInhibitor([]),
+            operation_lock_factory=lambda: nullcontext(),
         )
 
     def tearDown(self) -> None:

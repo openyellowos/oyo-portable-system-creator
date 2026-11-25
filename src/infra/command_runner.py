@@ -62,7 +62,7 @@ class CommandRunner:
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+            stdin=subprocess.PIPE if input_text is not None else None,
             text=True,
             cwd=cwd,
             start_new_session=True,

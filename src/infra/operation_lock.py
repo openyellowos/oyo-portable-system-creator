@@ -9,7 +9,7 @@ from types import TracebackType
 from src.core.errors import AppError
 
 
-LOCK_PATH = Path("/run/lock/oyo-portable-system-creator.lock")
+LOCK_PATH = Path("/run/oyo-portable-system-creator.lock")
 
 
 class OperationLock:

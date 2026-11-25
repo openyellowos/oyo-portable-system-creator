@@ -198,6 +198,7 @@ class WorkflowTests(unittest.TestCase):
             DummyFirstbootService(),
             self.logger,
             suspend_inhibitor_factory=lambda: nullcontext(),
+            operation_lock_factory=lambda: nullcontext(),
         )
 
     def tearDown(self) -> None:
@@ -255,15 +256,14 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.partition_service.calls, [])
 
     def test_stale_mount_scanner_matches_bind_mounts_under_workdir_prefix(self) -> None:
-        with patch("src.core.workflow.tempfile.gettempdir", return_value="/tmp"):
-            with patch(
-                "src.core.workflow.read_mountinfo_entries",
-                return_value=[("/tmp/oyo-portable-dead/root/dev", "/dev/other-usb3")],
-            ):
-                self.assertEqual(
-                    self.workflow._stale_work_mounts(),
-                    ["/tmp/oyo-portable-dead/root/dev"],
-                )
+        with patch(
+            "src.core.workflow.read_mountinfo_entries",
+            return_value=[("/var/tmp/oyo-portable-a1B2c3D4/root/dev", "/dev/other-usb3")],
+        ):
+            self.assertEqual(
+                self.workflow._stale_work_mounts(),
+                ["/var/tmp/oyo-portable-a1B2c3D4/root/dev"],
+            )
 
     def test_lock_contention_fails_before_precheck_or_device_mutation(self) -> None:
         self.workflow.precheck = lambda _state: self.fail("precheck must not run without the lock")  # type: ignore[method-assign]
@@ -518,9 +518,10 @@ class WorkflowTests(unittest.TestCase):
 
         with patch.object(partition_service, "prepare_device", return_value=("/dev/efi", "/dev/boot", "/dev/root")):
             with patch.object(partition_service, "assert_no_target_residuals"):
-                with patch("src.core.workflow.tempfile.mkdtemp", return_value=str(workdir)):
-                    with self.assertRaises(AppError):
-                        self.workflow.run_create(state)
+                with patch.object(partition_service, "assert_mapper_available"):
+                    with patch("src.core.workflow.tempfile.mkdtemp", return_value=str(workdir)):
+                        with self.assertRaises(AppError):
+                            self.workflow.run_create(state)
 
         self.assertIn(["cryptsetup", "close", "test-mapper"], runner.commands)
         self.assertTrue(marker.exists())

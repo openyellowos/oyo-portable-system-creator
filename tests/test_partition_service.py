@@ -437,6 +437,14 @@ class PartitionServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "could not parse target device inventory"):
             service.assert_no_target_residuals("/dev/fake")
 
+    def test_requested_mapper_conflict_stops_before_any_device_write(self) -> None:
+        runner = DummyRunner()
+        service = PartitionService(runner, DummyLogger())
+        with patch.object(service, "mapper_backing_device", return_value="/dev/other-usb4"):
+            with self.assertRaisesRegex(RuntimeError, "already active"):
+                service.assert_mapper_available("oyoport-cryptroot")
+        self.assertEqual(runner.calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()
