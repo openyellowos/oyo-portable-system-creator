@@ -53,22 +53,32 @@ class CommandRunnerTests(unittest.TestCase):
         self.assertTrue(any(name == "stdout" and "copy complete" in text for name, text in received))
 
     def test_streaming_setup_and_read_failures_stop_the_started_process_group(self) -> None:
-        for failure_point in ("setup", "read"):
+        for failure_point in ("setup", "select", "persistent_read"):
             with self.subTest(failure_point=failure_point), tempfile.TemporaryDirectory() as tmpdir:
                 runner = CommandRunner(DummyLogger())
                 runner.TERMINATION_GRACE_SECONDS = 0.25
                 pid_file = Path(tmpdir) / "command.pid"
                 ready_file = Path(tmpdir) / "command.ready"
-                script = (
-                    "import os, time; "
-                    f"open({str(ready_file)!r}, 'w').write('ready'); "
-                    "time.sleep(30)"
-                )
+                if failure_point == "persistent_read":
+                    script = (
+                        "import os, signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                        f"open({str(ready_file)!r}, 'w').write('ready'); "
+                        "os.write(1, b'ready\\n'); time.sleep(30)"
+                    )
+                else:
+                    script = (
+                        "import os, time; "
+                        f"open({str(ready_file)!r}, 'w').write('ready'); "
+                        "time.sleep(30)"
+                    )
+                stdout_fd: list[int] = []
                 original_popen = subprocess.Popen
 
                 def capture_process(*args, **kwargs):
                     process = original_popen(*args, **kwargs)
                     pid_file.write_text(str(process.pid), encoding="ascii")
+                    if process.stdout is not None:
+                        stdout_fd.append(process.stdout.fileno())
                     return process
 
                 def wait_until_ready() -> None:
@@ -82,7 +92,7 @@ class CommandRunnerTests(unittest.TestCase):
                     def selector_factory():
                         wait_until_ready()
                         raise OSError("EMFILE injected")
-                else:
+                elif failure_point == "select":
                     real_selector_factory = selectors.DefaultSelector
 
                     class FailingSelector:
@@ -97,15 +107,33 @@ class CommandRunnerTests(unittest.TestCase):
                             raise OSError("EIO injected")
 
                     selector_factory = FailingSelector
+                else:
+                    selector_factory = selectors.DefaultSelector
+
+                real_os_read = os.read
+
+                def failing_read(fd: int, size: int) -> bytes:
+                    if stdout_fd and fd == stdout_fd[0]:
+                        wait_until_ready()
+                        raise OSError(5, "EIO persistent injected")
+                    return real_os_read(fd, size)
 
                 try:
                     with patch("src.infra.command_runner.subprocess.Popen", new=capture_process):
                         with patch("src.infra.command_runner.selectors.DefaultSelector", new=selector_factory):
-                            with self.assertRaisesRegex(OSError, "injected"):
-                                runner.run(
-                                    [sys.executable, "-c", script],
-                                    output_callback=lambda _stream, _text: None,
-                                )
+                            if failure_point == "persistent_read":
+                                with patch("src.infra.command_runner.os.read", side_effect=failing_read):
+                                    with self.assertRaisesRegex(OSError, "injected"):
+                                        runner.run(
+                                            [sys.executable, "-c", script],
+                                            output_callback=lambda _stream, _text: None,
+                                        )
+                            else:
+                                with self.assertRaisesRegex(OSError, "injected"):
+                                    runner.run(
+                                        [sys.executable, "-c", script],
+                                        output_callback=lambda _stream, _text: None,
+                                    )
                     self.assertTrue(pid_file.exists(), "command must have started before the injected failure")
                     self.assertTrue(ready_file.exists(), "failure must happen after the command has started")
                     process_group_id = int(pid_file.read_text(encoding="ascii"))

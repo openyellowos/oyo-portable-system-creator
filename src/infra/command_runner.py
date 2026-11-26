@@ -276,7 +276,7 @@ class CommandRunner:
             # the workflow while rsync or one of its descendants can still
             # write to the target. This intentionally waits if the process
             # group cannot be confirmed stopped.
-            self._terminate_and_reap(process)
+            self._terminate_and_reap(process, drain_output=False)
             raise
 
         finally:
@@ -320,7 +320,12 @@ class CommandRunner:
             except Exception:
                 pass
 
-    def _terminate_and_reap(self, process: subprocess.Popen[str]) -> tuple[str, str]:
+    def _terminate_and_reap(
+        self,
+        process: subprocess.Popen[str],
+        *,
+        drain_output: bool = True,
+    ) -> tuple[str, str]:
         """Stop the full command session and reap it before workflow cleanup starts."""
         stalled_notified = False
 
@@ -352,14 +357,17 @@ class CommandRunner:
         kill_started_at = 0.0
         last_kill_at = 0.0
         while True:
-            try:
-                output = process.communicate(timeout=0.2)
-            except subprocess.TimeoutExpired:
-                output = None
-
+            # Never depend on draining pipes in order to terminate the process
+            # group. In streaming mode the read side itself may be failing; a
+            # second read through communicate() would otherwise bypass SIGKILL
+            # escalation and release ownership while a writer is still alive.
+            process.poll()  # reap the leader when it has exited; does not read pipes
             group_alive = self._process_group_alive(process.pid)
-            if output is not None and not group_alive:
-                return output
+            if not group_alive and process.poll() is not None:
+                process.wait()
+                if drain_output:
+                    return process.communicate()
+                return "", ""
 
             elapsed = time.monotonic() - started_at
             if not kill_sent and elapsed >= self.TERMINATION_GRACE_SECONDS:
@@ -377,8 +385,7 @@ class CommandRunner:
                 notify_stalled(
                     f"Command group {process.pid} is still running after SIGKILL; keeping the operation lock and suspend inhibitor, and not starting cleanup."
                 )
-            if output is not None:
-                time.sleep(0.1)
+            time.sleep(0.1)
 
     @staticmethod
     def _process_group_alive(process_group_id: int) -> bool:
