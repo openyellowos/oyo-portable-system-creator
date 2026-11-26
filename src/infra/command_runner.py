@@ -367,24 +367,24 @@ class CommandRunner:
             group_alive = self._process_group_alive(process.pid)
             if not group_alive and process.poll() is not None:
                 process.wait()
-                if drain_output:
-                    try:
-                        # A descendant may have moved to another process group
-                        # while retaining stdout/stderr. Never block forever
-                        # waiting for EOF: keep checking the managed group and
-                        # report a stall, but remain fail-closed until the pipes
-                        # close because that descendant may still be writing.
-                        return process.communicate(timeout=0.2)
-                    except subprocess.TimeoutExpired:
-                        now = time.monotonic()
-                        if pipe_wait_started_at is None:
-                            pipe_wait_started_at = now
-                        elif now - pipe_wait_started_at >= self.PIPE_EOF_STALL_SECONDS:
-                            notify_stalled(
-                                f"Command group {process.pid} has stopped but output pipes are still open outside the command group; keeping the operation lock and suspend inhibitor, and not starting cleanup."
-                            )
-                        continue
-                return "", ""
+                # Even when streaming's selector/read path failed, we must
+                # still prove that every writer has closed the pipes before
+                # returning to workflow cleanup. communicate() is bounded so
+                # an escaped descendant cannot cause an unobservable hang;
+                # failures to read are treated as an inability to prove EOF,
+                # not as permission to proceed.
+                if pipe_wait_started_at is None:
+                    pipe_wait_started_at = time.monotonic()
+                try:
+                    completed = process.communicate(timeout=0.2)
+                except (subprocess.TimeoutExpired, OSError):
+                    now = time.monotonic()
+                    if now - pipe_wait_started_at >= self.PIPE_EOF_STALL_SECONDS:
+                        notify_stalled(
+                            f"Command group {process.pid} has stopped but output pipes are still open or EOF could not be verified outside the command group; keeping the operation lock and suspend inhibitor, and not starting cleanup."
+                        )
+                    continue
+                return completed if drain_output else ("", "")
 
             elapsed = time.monotonic() - started_at
             if not kill_sent and elapsed >= self.TERMINATION_GRACE_SECONDS:
