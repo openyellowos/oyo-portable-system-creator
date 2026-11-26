@@ -27,6 +27,7 @@ class CommandResult:
 
 class CommandRunner:
     TERMINATION_GRACE_SECONDS = 3.0
+    PIPE_EOF_STALL_SECONDS = 5.0
 
     def __init__(
         self,
@@ -217,7 +218,7 @@ class CommandRunner:
                         leader_exited_at = now
                     if group_alive:
                         request_termination()
-                    elif selector.get_map() and now - leader_exited_at >= 5:
+                    elif selector.get_map() and now - leader_exited_at >= self.PIPE_EOF_STALL_SECONDS:
                         notify_stalled(
                             f"Command group {process.pid} has exited but output pipes are still open; keeping the operation lock and suspend inhibitor, and not starting cleanup."
                         )
@@ -356,6 +357,7 @@ class CommandRunner:
         kill_sent = False
         kill_started_at = 0.0
         last_kill_at = 0.0
+        pipe_wait_started_at: float | None = None
         while True:
             # Never depend on draining pipes in order to terminate the process
             # group. In streaming mode the read side itself may be failing; a
@@ -366,7 +368,22 @@ class CommandRunner:
             if not group_alive and process.poll() is not None:
                 process.wait()
                 if drain_output:
-                    return process.communicate()
+                    try:
+                        # A descendant may have moved to another process group
+                        # while retaining stdout/stderr. Never block forever
+                        # waiting for EOF: keep checking the managed group and
+                        # report a stall, but remain fail-closed until the pipes
+                        # close because that descendant may still be writing.
+                        return process.communicate(timeout=0.2)
+                    except subprocess.TimeoutExpired:
+                        now = time.monotonic()
+                        if pipe_wait_started_at is None:
+                            pipe_wait_started_at = now
+                        elif now - pipe_wait_started_at >= self.PIPE_EOF_STALL_SECONDS:
+                            notify_stalled(
+                                f"Command group {process.pid} has stopped but output pipes are still open outside the command group; keeping the operation lock and suspend inhibitor, and not starting cleanup."
+                            )
+                        continue
                 return "", ""
 
             elapsed = time.monotonic() - started_at

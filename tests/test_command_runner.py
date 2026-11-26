@@ -23,6 +23,9 @@ class DummyLogger:
     def debug(self, msg: str) -> None:
         self.messages.append(msg)
 
+    def error(self, msg: str) -> None:
+        self.messages.append(msg)
+
 
 class CommandRunnerTests(unittest.TestCase):
     def test_sanitize_output_for_log_removes_control_characters(self) -> None:
@@ -501,6 +504,105 @@ class CommandRunnerTests(unittest.TestCase):
             child_alive_when_runner_returned,
             "descendant holding inherited pipes must be stopped before normal completion",
         )
+
+    def test_normal_mode_reports_and_blocks_on_pipe_held_by_detached_descendant(self) -> None:
+        self._assert_detached_pipe_holder_blocks_cleanup(streaming=False)
+
+    def test_streaming_mode_reports_and_blocks_on_pipe_held_by_detached_descendant(self) -> None:
+        self._assert_detached_pipe_holder_blocks_cleanup(streaming=True)
+
+    def _assert_detached_pipe_holder_blocks_cleanup(self, *, streaming: bool) -> None:
+        cancel_event = threading.Event()
+        stalled = threading.Event()
+        stall_messages: list[str] = []
+        runner = CommandRunner(
+            DummyLogger(),
+            cancel_event=cancel_event,
+            cancel_stalled_callback=lambda reason: (stall_messages.append(reason), stalled.set()),
+        )
+        runner.TERMINATION_GRACE_SECONDS = 0.15
+        runner.PIPE_EOF_STALL_SECONDS = 0.2
+        outcome: list[object] = []
+        managed_processes: list[subprocess.Popen[bytes] | subprocess.Popen[str]] = []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pid_file = Path(tmpdir) / "detached-child.pid"
+            release_file = Path(tmpdir) / "release-child"
+            child_code = (
+                "import os, time\n"
+                f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
+                f"release = {str(release_file)!r}\n"
+                "deadline = time.monotonic() + 20\n"
+                "while not os.path.exists(release) and time.monotonic() < deadline:\n"
+                "    time.sleep(.01)\n"
+            )
+            parent_code = (
+                "import os, subprocess, sys, time\n"
+                f"subprocess.Popen([sys.executable, '-c', {child_code!r}], start_new_session=True)\n"
+                "deadline = time.monotonic() + 5\n"
+                f"while not os.path.exists({str(pid_file)!r}) and time.monotonic() < deadline:\n"
+                "    time.sleep(.01)\n"
+            )
+            command = [sys.executable, "-c", parent_code]
+            original_popen = subprocess.Popen
+
+            def capture_process(*args, **kwargs):
+                process = original_popen(*args, **kwargs)
+                managed_processes.append(process)
+                return process
+
+            def run_command() -> None:
+                try:
+                    kwargs = {"output_callback": lambda _stream, _text: None} if streaming else {}
+                    outcome.append(runner.run(command, **kwargs))
+                except BaseException as exc:
+                    outcome.append(exc)
+
+            thread = threading.Thread(target=run_command)
+            notified_while_blocked = False
+            detached_child_alive_when_notified = False
+            try:
+                with patch("src.infra.command_runner.subprocess.Popen", new=capture_process):
+                    thread.start()
+                    deadline = time.monotonic() + 5
+                    while not pid_file.exists() and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    self.assertTrue(pid_file.exists(), "detached descendant did not start")
+                    child_pid = int(pid_file.read_text(encoding="ascii"))
+                    cancel_event.set()
+                    self.assertTrue(stalled.wait(3), "pipe EOF stall must notify the caller")
+                    notified_while_blocked = thread.is_alive()
+                    detached_child_alive_when_notified = self._pid_is_running(child_pid)
+            finally:
+                # The detached process is deliberately outside the runner's
+                # process group; release it explicitly so the fail-closed test
+                # can finish without leaving a process behind.
+                release_file.touch(exist_ok=True)
+                if pid_file.exists():
+                    child_pid = int(pid_file.read_text(encoding="ascii"))
+                    deadline = time.monotonic() + 1
+                    while self._pid_is_running(child_pid) and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    if self._pid_is_running(child_pid):
+                        try:
+                            os.kill(child_pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                if thread.is_alive() and managed_processes:
+                    try:
+                        os.killpg(managed_processes[0].pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                thread.join(3)
+
+        self.assertTrue(notified_while_blocked, "runner must not return while an unmanaged writer holds pipes")
+        self.assertTrue(detached_child_alive_when_notified, "the pipe-holding detached process must remain live")
+        self.assertTrue(stall_messages)
+        self.assertIn("not starting cleanup", stall_messages[0])
+        self.assertFalse(thread.is_alive(), "test cleanup must release the detached pipe holder")
+        self.assertEqual(len(outcome), 1)
+        self.assertIsInstance(outcome[0], AppError)
+        self.assertEqual(outcome[0].code, "E123")  # type: ignore[union-attr]
 
     @staticmethod
     def _pid_is_running(pid: int) -> bool:
