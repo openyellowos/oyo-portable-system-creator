@@ -108,6 +108,16 @@ class CopyServiceTests(unittest.TestCase):
 
         self.assertEqual(progress, [1000, 50000])
 
+    def test_progress_parser_emits_unchanged_bytes_as_activity_sample(self) -> None:
+        progress: list[int] = []
+        parser = RsyncProgressParser(progress.append, minimum_interval=0.25)
+
+        with patch("src.services.copy_service.time.monotonic", side_effect=[10.0, 10.5]):
+            parser.feed("stderr", "500,000 50% 1.0MB/s 0:05\r")
+            parser.feed("stderr", "500,000 50% 1.0MB/s 0:05\r")
+
+        self.assertEqual(progress, [500000, 500000])
+
     def test_progress_parser_flushes_pending_value_when_stream_finishes(self) -> None:
         progress: list[int] = []
         parser = RsyncProgressParser(progress.append, minimum_interval=0.25)

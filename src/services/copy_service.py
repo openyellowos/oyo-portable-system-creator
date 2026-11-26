@@ -68,7 +68,7 @@ HOME_DIRS_COPY_FULL = [
 
 
 class RsyncProgressParser:
-    """Parse cumulative transferred file-size bytes from progress2 updates."""
+    """Parse cumulative transferred-file bytes, including unchanged activity samples."""
 
     _PROGRESS = re.compile(
         r"^\s*(?P<bytes>(?:[0-9]+|[0-9]{1,3}(?:[.,'’ \u00a0\u202f][0-9]{3})+))B?"
@@ -112,8 +112,6 @@ class RsyncProgressParser:
         transferred_bytes = max(transferred_bytes, self._observed_bytes)
         self._observed_bytes = transferred_bytes
         now = time.monotonic()
-        if transferred_bytes == self._last_bytes:
-            return
         self._pending_bytes = max(transferred_bytes, self._pending_bytes or 0)
         if now - self._last_emit < self.minimum_interval:
             return
@@ -121,7 +119,7 @@ class RsyncProgressParser:
         self._emit(self._pending_bytes, now)
 
     def _emit(self, transferred_bytes: int, now: float | None = None) -> None:
-        if transferred_bytes <= self._last_bytes:
+        if transferred_bytes < self._last_bytes:
             self._pending_bytes = None
             return
         self._last_bytes = transferred_bytes

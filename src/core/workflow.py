@@ -290,10 +290,13 @@ class Workflow:
         base_step = self.translate(step_key)
         last_copy_percent = -1
         last_transferred_bytes = 0
+        unchanged_percent_samples = 0
+        showing_active_status = False
         estimate_reached = False
 
         def update(transferred_bytes: int) -> None:
-            nonlocal last_copy_percent, last_transferred_bytes, estimate_reached
+            nonlocal last_copy_percent, last_transferred_bytes, unchanged_percent_samples
+            nonlocal showing_active_status, estimate_reached
             last_transferred_bytes = max(last_transferred_bytes, max(0, transferred_bytes))
             # progress2's percentage uses rsync's incrementally growing total_size.
             # Use the dry-run's fixed transferred-file-size estimate as the denominator
@@ -309,8 +312,16 @@ class Workflow:
 
             bounded = min(94, (last_transferred_bytes * 100) // estimated_bytes)
             if bounded == last_copy_percent:
+                unchanged_percent_samples += 1
+                if unchanged_percent_samples >= 4 and not showing_active_status:
+                    showing_active_status = True
+                    overall = start + (bounded * width // 100)
+                    step = self.translate("workflow.copy.processing", step=base_step)
+                    self._update_progress(state, overall, step)
                 return
             last_copy_percent = bounded
+            unchanged_percent_samples = 0
+            showing_active_status = False
             overall = start + (bounded * width // 100)
             step = self.translate("workflow.copy.progress", step=base_step, progress=bounded)
             self._update_progress(state, overall, step)

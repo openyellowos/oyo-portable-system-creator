@@ -244,6 +244,22 @@ class WorkflowTests(unittest.TestCase):
         state.metadata["copy_bytes"] = 0
         self.assertIsNone(self.workflow._copy_progress_callback(state, 1))
 
+    def test_copy_progress_shows_processing_when_percent_stays_unchanged(self) -> None:
+        state = ExecutionState(mode="create", target_device="/dev/sdz")
+        state.metadata["copy_bytes"] = 1000
+        updates: list[tuple[int, str]] = []
+        state.add_progress_listener(lambda percent, step: updates.append((percent, step)))
+        callback = self.workflow._copy_progress_callback(state, 1)
+        assert callback is not None
+
+        callback(500)
+        for _ in range(4):
+            callback(500)
+        self.assertIn("コピー処理中", updates[-1][1])
+        callback(510)
+        self.assertIn("51%", updates[-1][1])
+        self.assertTrue(all(a <= b for a, b in zip((p for p, _ in updates), (p for p, _ in updates[1:]))))
+
     def test_copy_pass_two_uses_verification_status_without_byte_percentage(self) -> None:
         state = ExecutionState(mode="create", target_device="/dev/sdz")
         state.metadata["copy_bytes"] = 1024
