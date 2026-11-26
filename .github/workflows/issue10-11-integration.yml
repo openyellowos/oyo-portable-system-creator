@@ -1,11 +1,12 @@
-name: Issue 10 and 11 integration validation
+name: Portable System Creator offline validation
 on:
   push:
     branches:
+      - main
       - review/issue10-11-integration-20261123
-      - codex/issue-11-abnormal-exit
   pull_request:
     branches:
+      - main
       - review/issue10-11-integration-20261123
 
 permissions:
