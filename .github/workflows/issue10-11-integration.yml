@@ -3,6 +3,10 @@ on:
   push:
     branches:
       - review/issue10-11-integration-20261123
+      - codex/issue-11-abnormal-exit
+  pull_request:
+    branches:
+      - review/issue10-11-integration-20261123
 
 permissions:
   contents: read
