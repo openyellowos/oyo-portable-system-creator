@@ -5,6 +5,7 @@ import threading
 import time
 import sys
 import os
+import signal
 import subprocess
 import tempfile
 from pathlib import Path
@@ -208,6 +209,86 @@ class CommandRunnerTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0)
         self.assertFalse(self._pid_is_running(child_pid), "same-group descendant must not outlive command")
+
+    def test_normal_completion_reaps_descendant_holding_pipes_without_cancellation(self) -> None:
+        runner = CommandRunner(DummyLogger())
+        runner.TERMINATION_GRACE_SECONDS = 0.25
+        outcome: list[object] = []
+        launched: list[subprocess.Popen[str]] = []
+        child_alive_when_runner_returned: bool | None = None
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pid_file = Path(tmpdir) / "child.pid"
+            child_code = (
+                "import os, signal, time; "
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                f"open({str(pid_file)!r}, 'w').write(str(os.getpid())); "
+                "time.sleep(30)"
+            )
+            parent_code = (
+                "import os, subprocess, sys, time\n"
+                f"subprocess.Popen([sys.executable, '-c', {child_code!r}])\n"
+                "deadline = time.monotonic() + 5\n"
+                f"while not os.path.exists({str(pid_file)!r}) and time.monotonic() < deadline:\n"
+                "    time.sleep(0.01)\n"
+            )
+
+            command = [sys.executable, "-c", parent_code]
+            original_popen = subprocess.Popen
+
+            def capture_process(*args, **kwargs):
+                process = original_popen(*args, **kwargs)
+                launched.append(process)
+                return process
+
+            def run_command() -> None:
+                try:
+                    outcome.append(runner.run(command))
+                except BaseException as exc:
+                    outcome.append(exc)
+
+            thread = threading.Thread(target=run_command)
+            try:
+                with patch("src.infra.command_runner.subprocess.Popen", new=capture_process):
+                    thread.start()
+                    thread.join(3)
+                completed_within_bound = not thread.is_alive()
+                if completed_within_bound and pid_file.exists():
+                    child_alive_when_runner_returned = self._pid_is_running(
+                        int(pid_file.read_text(encoding="ascii"))
+                    )
+            finally:
+                # On a regression, don't leave the deliberate 30-second child
+                # behind. The command runner starts each process in its own
+                # session, so this PID identifies only this test's process group.
+                if thread.is_alive() and launched:
+                    try:
+                        os.killpg(launched[0].pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    thread.join(3)
+                elif launched and runner._process_group_alive(launched[0].pid):
+                    try:
+                        os.killpg(launched[0].pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                if thread.is_alive():
+                    thread.join(3)
+
+            child_pid = int(pid_file.read_text(encoding="ascii")) if pid_file.exists() else None
+
+        self.assertTrue(
+            completed_within_bound,
+            "normal completion must not wait for a descendant that holds inherited pipes",
+        )
+        self.assertEqual(len(outcome), 1)
+        self.assertFalse(isinstance(outcome[0], BaseException), f"command failed: {outcome[0]!r}")
+        self.assertEqual(outcome[0].returncode, 0)  # type: ignore[union-attr]
+        self.assertIsNotNone(child_pid, "descendant did not start")
+        self.assertIsNotNone(child_alive_when_runner_returned)
+        self.assertFalse(
+            child_alive_when_runner_returned,
+            "descendant holding inherited pipes must be stopped before normal completion",
+        )
 
     @staticmethod
     def _pid_is_running(pid: int) -> bool:

@@ -97,6 +97,16 @@ class CommandRunner:
                     break
                 except subprocess.TimeoutExpired:
                     first_communicate = False
+                    # A descendant can inherit stdout/stderr and keep the
+                    # pipes open after the command leader has exited. In that
+                    # case communicate() keeps timing out forever. Once the
+                    # leader is done, stop/reap the remaining session members
+                    # before allowing the workflow to continue.
+                    if process.poll() is not None:
+                        completed = self._terminate_and_reap(process)
+                        if not self._ignore_cancel and self.cancel_event is not None and self.cancel_event.is_set():
+                            raise AppError.translated("E123", "error.operation_cancelled")
+                        break
         except KeyboardInterrupt:
             self._terminate_and_reap(process)
             raise
