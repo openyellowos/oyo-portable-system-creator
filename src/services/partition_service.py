@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import stat
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -17,9 +19,35 @@ class PartitionService:
         self.runner = runner
         self.logger = logger
 
-    def prepare_device(self, device: str) -> tuple[str, str, str]:
+    def prepare_device(
+        self,
+        device: str,
+        *,
+        expected_identity: dict[str, int | None] | None = None,
+    ) -> tuple[str, str, str]:
         try:
-            self.unmount_device(device)
+            # Never adopt or release resources that appeared after precheck.
+            # Re-inspect at the destructive boundary and fail closed instead.
+            try:
+                verified_identity = self.assert_no_target_residuals(
+                    device, expected_identity=expected_identity
+                )
+                # Older test doubles and compatible overrides may not return
+                # the snapshot. In production the inspection returns it; an
+                # explicit precheck identity is the only safe fallback.
+                if not isinstance(verified_identity, dict):
+                    verified_identity = expected_identity
+                if not isinstance(verified_identity, dict):
+                    raise RuntimeError("target identity snapshot unavailable before preparation")
+                final_identity = self._block_identity(device)
+                if not self._same_identity(final_identity, verified_identity):
+                    raise RuntimeError(f"target device identity changed before preparation: {device}")
+                if expected_identity is not None and not self._same_identity(final_identity, expected_identity):
+                    raise RuntimeError(f"target device identity changed since validation: {device}")
+            except AppError:
+                raise
+            except Exception as exc:
+                raise AppError.translated("E125", "error.residual_resources", reason=str(exc)) from exc
             self._clear_device_signatures(device)
             self.runner.run(["parted", "-s", device, "mklabel", "gpt"])
             self.runner.run(["parted", "-s", device, "mkpart", "BIOSBOOT", "1MiB", "3MiB"])
@@ -40,6 +68,137 @@ class PartitionService:
         boot = f"{device}{suffix}3"
         root = f"{device}{suffix}4"
         return efi, boot, root
+
+    def assert_no_target_residuals(
+        self,
+        device: str,
+        *,
+        expected_identity: dict[str, int | None] | None = None,
+    ) -> dict[str, int | None]:
+        """Fail closed if the selected physical device still owns active resources."""
+        requested_before = self._block_identity(device)
+        if expected_identity is not None and not self._same_identity(requested_before, expected_identity):
+            raise RuntimeError(f"target device identity changed since validation: {device}")
+        result = self.runner.run(
+            ["lsblk", "--json", "--paths", "--tree", "--output", "PATH,TYPE,MOUNTPOINTS,MAJ:MIN", device],
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"could not inspect target device {device}")
+        try:
+            inventory = json.loads(result.stdout)
+            roots = inventory["blockdevices"]
+            if not isinstance(roots, list) or len(roots) != 1 or not isinstance(roots[0], dict):
+                raise ValueError("expected exactly one target device")
+            rows: list[tuple[str, str, list[str], str]] = []
+
+            def visit(nodes: object) -> None:
+                if not isinstance(nodes, list):
+                    raise ValueError("invalid block-device children")
+                for node in nodes:
+                    if (
+                        not isinstance(node, dict)
+                        or not isinstance(node.get("path"), str)
+                        or not node["path"].startswith("/dev/")
+                        or not isinstance(node.get("type"), str)
+                        or not node["type"]
+                        or not isinstance(node.get("maj:min"), str)
+                        or not re.fullmatch(r"[0-9]+:[0-9]+", node["maj:min"])
+                    ):
+                        raise ValueError("invalid block-device row")
+                    mountpoints = node.get("mountpoints") or []
+                    if isinstance(mountpoints, str):
+                        mountpoints = [mountpoints]
+                    if not isinstance(mountpoints, list) or any(
+                        item is not None and not isinstance(item, str) for item in mountpoints
+                    ):
+                        raise ValueError("invalid block-device mountpoints")
+                    rows.append((node["path"], node["type"], [item for item in mountpoints if item], node["maj:min"]))
+                    children = node.get("children")
+                    if children is not None:
+                        visit(children)
+
+            visit(roots)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"could not parse target device inventory for {device}: {exc}") from exc
+
+        requested_after = self._block_identity(device)
+        if not self._same_identity(requested_before, requested_after):
+            raise RuntimeError(f"target device identity changed during inspection: {device}")
+        if expected_identity is not None and not self._same_identity(requested_after, expected_identity):
+            raise RuntimeError(f"target device identity changed since validation: {device}")
+        if not rows or rows[0][3] != self._majmin(requested_after):
+            raise RuntimeError(f"target inventory identity does not match selected device: {device}")
+        target_identities: set[int] = set()
+        for index, (path, _, _, inventory_majmin) in enumerate(rows):
+            identity = self._block_identity(path)
+            if self._majmin(identity) != inventory_majmin:
+                raise RuntimeError(f"target inventory identity changed during inspection: {path}")
+            if index == 0 and not self._same_identity(identity, expected_identity or requested_after):
+                raise RuntimeError(f"target inventory identity changed during inspection: {path}")
+            target_identities.add(os.makedev(identity["major"], identity["minor"]))
+        residuals: list[str] = []
+        for path, node_type, mountpoints, _ in rows:
+            if node_type.lower() in {"crypt", "swap"}:
+                residuals.append(f"{node_type} mapping {path}")
+            for mountpoint in mountpoints:
+                if mountpoint == "[SWAP]":
+                    residuals.append(f"active swap {path}")
+                elif mountpoint:
+                    residuals.append(f"mount {mountpoint} from {path}")
+
+        # Match /proc/swaps by kernel block identity, not a possibly renamed
+        # /dev path. A failed snapshot is not equivalent to an empty swap table.
+        for swap_path in self._active_swaps():
+            try:
+                swap_info = os.stat(swap_path)
+            except FileNotFoundError:
+                # The path may have been renamed since /proc/swaps was read; the
+                # selected device's lsblk rows above still identify its live nodes.
+                continue
+            if not stat.S_ISBLK(swap_info.st_mode):
+                # Swap files are not block-device identities. If one is on a
+                # mounted target filesystem, that target mount was rejected above.
+                continue
+            swap_identity = swap_info.st_rdev
+            if swap_identity in target_identities:
+                residuals.append(f"active swap {swap_path}")
+        if residuals:
+            raise RuntimeError("target device has active resources: " + "; ".join(dict.fromkeys(residuals)))
+        return requested_after
+
+    @staticmethod
+    def _majmin(identity: dict[str, int | None]) -> str:
+        return f"{identity['major']}:{identity['minor']}"
+
+    @staticmethod
+    def _same_identity(left: dict[str, int | None], right: dict[str, int | None]) -> bool:
+        if left.get("major") != right.get("major") or left.get("minor") != right.get("minor"):
+            return False
+        expected_diskseq = right.get("diskseq")
+        return expected_diskseq is None or left.get("diskseq") == expected_diskseq
+
+    @staticmethod
+    def _block_identity(path: str) -> dict[str, int | None]:
+        info = os.stat(path)
+        if not stat.S_ISBLK(info.st_mode):
+            raise RuntimeError(f"target inventory contains a non-block device: {path}")
+        major, minor = os.major(info.st_rdev), os.minor(info.st_rdev)
+        diskseq: int | None = None
+        diskseq_path = Path("/sys/dev/block") / f"{major}:{minor}" / "diskseq"
+        try:
+            diskseq = int(diskseq_path.read_text(encoding="ascii").strip())
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"could not read {diskseq_path}: {exc}") from exc
+        return {"major": major, "minor": minor, "diskseq": diskseq}
+
+    def assert_mapper_available(self, mapper_name: str) -> None:
+        """Do not format a target if the requested mapper name is already active."""
+        backing = self.mapper_backing_device(mapper_name)
+        if backing is not None:
+            raise RuntimeError(f"LUKS mapper {mapper_name} is already active on {backing}")
 
     def _clear_device_signatures(self, device: str) -> None:
         self.runner.run(["dd", "if=/dev/zero", f"of={device}", "bs=1M", "count=16", "conv=fsync"], check=True)
@@ -255,6 +414,16 @@ class PartitionService:
     def _active_swaps() -> set[str]:
         try:
             lines = Path("/proc/swaps").read_text(encoding="utf-8").splitlines()
-        except OSError:
-            return set()
-        return {line.split()[0] for line in lines[1:] if line.strip()}
+        except OSError as exc:
+            raise RuntimeError(f"could not inspect active swap devices: {exc}") from exc
+        if not lines or not lines[0].startswith("Filename"):
+            raise RuntimeError("malformed /proc/swaps snapshot")
+        swaps: set[str] = set()
+        for line in lines[1:]:
+            if not line.strip():
+                continue
+            fields = line.split()
+            if len(fields) < 5 or not fields[0].startswith("/"):
+                raise RuntimeError("malformed /proc/swaps entry")
+            swaps.add(fields[0])
+        return swaps

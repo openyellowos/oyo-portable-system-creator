@@ -4,8 +4,9 @@ import unittest
 from unittest.mock import patch
 
 from PyQt6.QtWidgets import QApplication
+from PyQt6.QtGui import QCloseEvent
 
-from src.gui.main_window import MainWindow
+from src.gui.main_window import CreateWorker, MainWindow
 
 
 class MainWindowPasswordValidationTests(unittest.TestCase):
@@ -57,6 +58,24 @@ class MainWindowDeviceSelectionTests(unittest.TestCase):
         self.assertEqual(self.window.progress_bar.value(), 20)
         self.assertEqual(self.window.status_label.text(), "パーティションを作成")
         self.assertEqual(self.window.log_view.toPlainText().splitlines(), ["existing"])
+
+    def test_close_during_create_requests_safe_cancel_and_defers_close(self) -> None:
+        class RunningThread:
+            def isRunning(self) -> bool:
+                return True
+
+        worker = CreateWorker("/dev/sdz", "ja")
+        self.window.worker = worker
+        self.window.worker_thread = RunningThread()  # type: ignore[assignment]
+        event = QCloseEvent()
+
+        self.window.closeEvent(event)
+
+        self.assertTrue(worker.cancel_event.is_set())
+        self.assertFalse(event.isAccepted())
+        self.assertTrue(self.window._close_when_worker_stops)
+        self.window.worker_thread = None
+        self.window.worker = None
 
 
 if __name__ == "__main__":

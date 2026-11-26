@@ -3,12 +3,14 @@ from __future__ import annotations
 import tempfile
 import unittest
 from contextlib import nullcontext
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
 from src.core.errors import AppError
 from src.core.state import ExecutionState
 from src.core.workflow import Workflow
+from src.infra.operation_lock import OperationLock
 from src.services.partition_service import PartitionService
 
 
@@ -102,6 +104,9 @@ class DummyDeviceService:
     def validate_target_device(self, target_device: str) -> None:
         return None
 
+    def target_device_identity(self, target_device: str) -> dict[str, int | None]:
+        return {"major": 0, "minor": 101, "diskseq": 7}
+
     def estimate_required_bytes(self, copy_bytes: int) -> int:
         return copy_bytes
 
@@ -113,8 +118,15 @@ class DummyPartitionService:
     def __init__(self, work_root: Path) -> None:
         self.work_root = work_root
         self.calls: list[tuple[str, str]] = []
+        self.expected_identity: dict[str, int | None] | None = None
 
-    def prepare_device(self, target_device: str) -> tuple[str, str, str]:
+    def prepare_device(
+        self,
+        target_device: str,
+        *,
+        expected_identity: dict[str, int | None] | None = None,
+    ) -> tuple[str, str, str]:
+        self.expected_identity = expected_identity
         return ("/dev/fake-efi", "/dev/fake-boot", "/dev/fake-root")
 
     def make_filesystems_and_mount(self, efi: str, boot: str, root: str, workdir: Path, **_: object) -> Path:
@@ -196,6 +208,7 @@ class WorkflowTests(unittest.TestCase):
             DummyFirstbootService(),
             self.logger,
             suspend_inhibitor_factory=lambda: nullcontext(),
+            operation_lock_factory=lambda: nullcontext(),
         )
 
     def tearDown(self) -> None:
@@ -206,13 +219,20 @@ class WorkflowTests(unittest.TestCase):
         self.workflow.precheck = lambda state: events.append("precheck")  # type: ignore[method-assign]
         prepare_device = self.partition_service.prepare_device
 
-        def record_prepare(target_device: str) -> tuple[str, str, str]:
+        def record_prepare(target_device: str, **kwargs: object) -> tuple[str, str, str]:
             events.append("prepare")
-            return prepare_device(target_device)
+            return prepare_device(target_device, **kwargs)
 
         self.partition_service.prepare_device = record_prepare  # type: ignore[method-assign]
         self.workflow.run_create(ExecutionState(mode="create", target_device="/dev/sdz"))
         self.assertEqual(events, ["precheck", "prepare"])
+
+    def test_precheck_identity_is_carried_to_destructive_boundary(self) -> None:
+        state = ExecutionState(mode="create", target_device="/dev/sdz")
+        self.workflow.run_create(state)
+        expected = {"major": 0, "minor": 101, "diskseq": 7}
+        self.assertEqual(state.metadata["_target_device_identity"], expected)
+        self.assertEqual(self.partition_service.expected_identity, expected)
 
     def test_run_create_runs_rsync_twice(self) -> None:
         state = ExecutionState(mode="create", target_device="/dev/sdz")
@@ -231,6 +251,134 @@ class WorkflowTests(unittest.TestCase):
         )
         self.assertTrue(any("システムをコピー (1/2)" in msg for msg in self.logger.messages))
         self.assertTrue(any("システムを再同期 (2/2)" in msg for msg in self.logger.messages))
+
+    def test_stale_work_mount_on_another_usb_blocks_before_device_preparation(self) -> None:
+        self.workflow.precheck = lambda _state: None  # type: ignore[method-assign]
+        with patch.object(
+            self.workflow,
+            "_stale_work_mounts",
+            return_value=["/tmp/oyo-portable-old/root/boot/efi"],
+        ):
+            with self.assertRaises(AppError) as raised:
+                self.workflow.run_create(ExecutionState(mode="create", target_device="/dev/sdz"))
+        self.assertEqual(raised.exception.code, "E125")
+        self.assertEqual(self.partition_service.calls, [])
+
+    def test_late_target_mount_blocks_at_destructive_boundary(self) -> None:
+        self.workflow.precheck = lambda _state: None  # type: ignore[method-assign]
+        inspection_count = 0
+
+        def inspect_target(_device: str, *, expected_identity=None) -> None:
+            nonlocal inspection_count
+            inspection_count += 1
+            if inspection_count == 2:
+                raise RuntimeError("late mount appeared")
+
+        self.partition_service.assert_no_target_residuals = inspect_target  # type: ignore[attr-defined,method-assign]
+        with patch.object(self.partition_service, "prepare_device") as prepare:
+            with self.assertRaises(AppError) as raised:
+                self.workflow.run_create(ExecutionState(mode="create", target_device="/dev/sdz"))
+        self.assertEqual(raised.exception.code, "E125")
+        self.assertEqual(inspection_count, 2)
+        prepare.assert_not_called()
+
+    def test_mountinfo_read_failure_blocks_before_device_preparation(self) -> None:
+        self.workflow.precheck = lambda _state: None  # type: ignore[method-assign]
+        with patch.object(self.workflow, "_stale_work_mounts", side_effect=OSError("mountinfo unavailable")):
+            with self.assertRaises(AppError) as raised:
+                self.workflow.run_create(ExecutionState(mode="create", target_device="/dev/sdz"))
+        self.assertEqual(raised.exception.code, "E125")
+        self.assertEqual(self.partition_service.calls, [])
+
+    def test_stale_mount_scanner_matches_bind_mounts_under_workdir_prefix(self) -> None:
+        with patch(
+            "src.core.workflow.read_mountinfo_entries",
+            return_value=[("/var/tmp/oyo-portable-a1b2c3d4/root/dev", "/dev/other-usb3")],
+        ):
+            self.assertEqual(
+                self.workflow._stale_work_mounts(),
+                ["/var/tmp/oyo-portable-a1b2c3d4/root/dev"],
+            )
+
+    def test_stale_mount_scanner_matches_tempfile_suffix_with_underscore(self) -> None:
+        with patch(
+            "src.core.workflow.read_mountinfo_entries",
+            return_value=[("/old-tmp/oyo-portable-ab_cd123/root/dev", "/dev/other-usb3")],
+        ):
+            self.assertEqual(
+                self.workflow._stale_work_mounts(),
+                ["/old-tmp/oyo-portable-ab_cd123/root/dev"],
+            )
+
+    def test_lock_contention_fails_before_precheck_or_device_mutation(self) -> None:
+        self.workflow.precheck = lambda _state: self.fail("precheck must not run without the lock")  # type: ignore[method-assign]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lock_path = Path(tmpdir) / "operation.lock"
+            self.workflow.operation_lock_factory = lambda: OperationLock(lock_path)
+            with OperationLock(lock_path):
+                with self.assertRaises(AppError) as raised:
+                    self.workflow.run_create(ExecutionState(mode="create", target_device="/dev/sdz"))
+        self.assertEqual(raised.exception.code, "E124")
+        self.assertEqual(self.partition_service.calls, [])
+
+    def test_operation_lock_remains_held_through_cleanup_and_releases_afterward(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lock_path = Path(tmpdir) / "operation.lock"
+            self.workflow.operation_lock_factory = lambda: OperationLock(lock_path)
+            cleanup = self.workflow.cleanup
+
+            def assert_locked_during_cleanup(state: ExecutionState) -> None:
+                with self.assertRaises(AppError) as raised:
+                    with OperationLock(lock_path):
+                        self.fail("lock was released before cleanup")
+                self.assertEqual(raised.exception.code, "E124")
+                cleanup(state)
+
+            self.workflow.cleanup = assert_locked_during_cleanup  # type: ignore[method-assign]
+            self.workflow.run_create(ExecutionState(mode="create", target_device="/dev/sdz"))
+            with OperationLock(lock_path):
+                pass
+
+    def test_cancel_after_mount_attempt_runs_cleanup_before_inhibitor_release(self) -> None:
+        events: list[str] = []
+
+        class CancellingRunner(DummyRunner):
+            checks = 0
+
+            def check_cancelled(self) -> None:
+                self.checks += 1
+                if self.checks == 4:
+                    raise AppError.translated("E123", "error.operation_cancelled")
+
+            @contextmanager
+            def allow_cleanup_after_cancel(self):
+                yield
+
+            def run(self, command: list[str], check: bool = False, **_: object) -> DummyRunnerResult:
+                if command[0] == "umount":
+                    events.append("umount")
+                return DummyRunnerResult()
+
+        class TrackingInhibitor:
+            def __enter__(self):
+                events.append("inhibitor_enter")
+                return self
+
+            def __exit__(self, *_args):
+                events.append("inhibitor_release")
+
+        runner = CancellingRunner()
+        device_service = DummyDeviceService()
+        device_service.runner = runner
+        self.workflow.device_service = device_service
+        self.workflow.suspend_inhibitor_factory = TrackingInhibitor
+        with self.assertRaises(AppError) as raised:
+            self.workflow.run_create(ExecutionState(mode="create", target_device="/dev/sdz"))
+
+        self.assertEqual(raised.exception.code, "E123")
+        self.assertIn("umount", events)
+        self.assertEqual(events[-1], "inhibitor_release")
+        self.assertEqual(self.copy_service.rsync_calls, [])
 
     def _assert_cleanup_failure_preserves_workdir(self, failure: BaseException | int) -> None:
         runner = UnmountFailureRunner(failure)
@@ -269,9 +417,10 @@ class WorkflowTests(unittest.TestCase):
 
         with patch.object(partition_service, "prepare_device", return_value=("/dev/efi", "/dev/boot", "/dev/root")):
             with patch.object(partition_service, "mount_source_for", return_value=None):
-                with patch("src.core.workflow.tempfile.mkdtemp", return_value=str(workdir)):
-                    with self.assertRaises(AppError):
-                        self.workflow.run_create(state)
+                with patch.object(partition_service, "assert_no_target_residuals"):
+                    with patch("src.core.workflow.tempfile.mkdtemp", return_value=str(workdir)):
+                        with self.assertRaises(AppError):
+                            self.workflow.run_create(state)
 
         self.assertIn(["mount", "/dev/root", str(workdir / "root")], runner.commands)
         self.assertIn(["mount", "/dev/boot", str(workdir / "root" / "boot")], runner.commands)
@@ -301,11 +450,12 @@ class WorkflowTests(unittest.TestCase):
         state = ExecutionState(mode="create", target_device="/dev/sdz")
 
         with patch.object(partition_service, "prepare_device", return_value=("/dev/efi", "/dev/boot", "/dev/fake-root")):
-            with patch("src.core.workflow.tempfile.mkdtemp", return_value=str(alias_workdir)):
-                with patch("pathlib.Path.read_text", return_value=mountinfo):
-                    with patch("src.core.workflow.shutil.rmtree") as remove_tree:
-                        with self.assertRaisesRegex(RuntimeError, "remains active"):
-                            self.workflow.run_create(state)
+            with patch.object(partition_service, "assert_no_target_residuals"):
+                with patch("src.core.workflow.tempfile.mkdtemp", return_value=str(alias_workdir)):
+                    with patch("pathlib.Path.read_text", return_value=mountinfo):
+                        with patch("src.core.workflow.shutil.rmtree") as remove_tree:
+                            with self.assertRaisesRegex(RuntimeError, "remains active"):
+                                self.workflow.run_create(state)
 
         expected_mount = str(canonical_root)
         # On uncertain cleanup, retain every tracked attempt for a future
@@ -430,9 +580,11 @@ class WorkflowTests(unittest.TestCase):
         )
 
         with patch.object(partition_service, "prepare_device", return_value=("/dev/efi", "/dev/boot", "/dev/root")):
-            with patch("src.core.workflow.tempfile.mkdtemp", return_value=str(workdir)):
-                with self.assertRaises(AppError):
-                    self.workflow.run_create(state)
+            with patch.object(partition_service, "assert_no_target_residuals"):
+                with patch.object(partition_service, "assert_mapper_available"):
+                    with patch("src.core.workflow.tempfile.mkdtemp", return_value=str(workdir)):
+                        with self.assertRaises(AppError):
+                            self.workflow.run_create(state)
 
         self.assertIn(["cryptsetup", "close", "test-mapper"], runner.commands)
         self.assertTrue(marker.exists())

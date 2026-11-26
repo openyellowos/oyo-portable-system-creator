@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
@@ -66,7 +67,7 @@ class DummyPartitionService:
         self.work_root = work_root
         self.calls: list[tuple[str, str]] = []
 
-    def prepare_device(self, target_device: str) -> tuple[str, str, str]:
+    def prepare_device(self, target_device: str, **_: object) -> tuple[str, str, str]:
         return ("/dev/fake-efi", "/dev/fake-boot", "/dev/fake-root")
 
     def make_filesystems_and_mount(self, efi: str, boot: str, root: str, workdir: Path, **_: object) -> Path:
@@ -169,6 +170,7 @@ class WorkflowTests(unittest.TestCase):
             DummyFirstbootService(),
             self.logger,
             suspend_inhibitor_factory=lambda: DummyInhibitor([]),
+            operation_lock_factory=lambda: nullcontext(),
         )
 
     def tearDown(self) -> None:
