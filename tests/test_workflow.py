@@ -226,13 +226,13 @@ class WorkflowTests(unittest.TestCase):
         second = self.workflow._copy_progress_callback(state, 2)
         assert first is not None
         self.assertIsNone(second)
-        for transferred_bytes in (0, 50, 98, 99, 100, 25):
+        for transferred_bytes in (0, 50, 94, 95, 100, 25):
             first(transferred_bytes)
 
         self.assertEqual([percent for percent, _ in updates], [45, 49, 53, 53])
         self.assertIn("(1/2)", updates[1][1])
         self.assertIn("50%", updates[1][1])
-        self.assertIn("見積容量分", updates[-1][1])
+        self.assertIn("見積量の大半", updates[-1][1])
         self.assertNotIn("100%", " ".join(step for _, step in updates))
         self.assertTrue(all(a <= b for a, b in zip((v[0] for v in updates), (v[0] for v in updates[1:]))))
 

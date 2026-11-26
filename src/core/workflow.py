@@ -297,16 +297,17 @@ class Workflow:
             last_transferred_bytes = max(last_transferred_bytes, max(0, transferred_bytes))
             # progress2's percentage uses rsync's incrementally growing total_size.
             # Use the dry-run's fixed transferred-file-size estimate as the denominator
-            # instead, while reserving the final 1% for the process-completion boundary.
-            if last_transferred_bytes * 100 >= estimated_bytes * 99:
+            # instead. Stop showing a percentage near the estimate: rsync may still
+            # need substantial file-list/metadata work, and the estimate can be stale.
+            if last_transferred_bytes * 100 >= estimated_bytes * 95:
                 if not estimate_reached:
                     estimate_reached = True
-                    overall = start + (98 * width // 100)
+                    overall = start + (94 * width // 100)
                     step = self.translate("workflow.copy.estimate_reached", step=base_step)
                     self._update_progress(state, overall, step)
                 return
 
-            bounded = min(98, (last_transferred_bytes * 100) // estimated_bytes)
+            bounded = min(94, (last_transferred_bytes * 100) // estimated_bytes)
             if bounded == last_copy_percent:
                 return
             last_copy_percent = bounded
