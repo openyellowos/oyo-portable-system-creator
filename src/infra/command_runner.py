@@ -377,12 +377,17 @@ class CommandRunner:
                     pipe_wait_started_at = time.monotonic()
                 try:
                     completed = process.communicate(timeout=0.2)
-                except (subprocess.TimeoutExpired, OSError):
+                except (subprocess.TimeoutExpired, OSError) as exc:
                     now = time.monotonic()
                     if now - pipe_wait_started_at >= self.PIPE_EOF_STALL_SECONDS:
                         notify_stalled(
                             f"Command group {process.pid} has stopped but output pipes are still open or EOF could not be verified outside the command group; keeping the operation lock and suspend inhibitor, and not starting cleanup."
                         )
+                    if isinstance(exc, OSError):
+                        # communicate(timeout=...) can fail immediately when
+                        # reads keep erroring. Back off so an unverifiable EOF
+                        # remains fail-closed without spinning a CPU core.
+                        time.sleep(0.1)
                     continue
                 return completed if drain_output else ("", "")
 
