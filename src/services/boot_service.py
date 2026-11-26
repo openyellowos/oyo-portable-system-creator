@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 from src.core.errors import AppError
@@ -13,14 +14,35 @@ class BootService:
         self.runner = runner
         self.chroot = chroot
 
-    def install_grub(self, root_mount: Path, target_device: str, boot_uuid: str) -> None:
+    def _run_chroot(
+        self,
+        root_mount: Path,
+        command: list[str],
+        on_bind_cleanup_failure: Callable[[], None] | None,
+    ) -> None:
+        if on_bind_cleanup_failure is None:
+            self.chroot.run_in_chroot(root_mount, command)
+        else:
+            self.chroot.run_in_chroot(
+                root_mount, command,
+                on_bind_cleanup_failure=on_bind_cleanup_failure,
+            )
+
+    def install_grub(
+        self,
+        root_mount: Path,
+        target_device: str,
+        boot_uuid: str,
+        *,
+        on_bind_cleanup_failure: Callable[[], None] | None = None,
+    ) -> None:
         try:
             if not target_device:
                 raise AppError.translated("E501", "error.empty_grub_target_device")
             if not boot_uuid or boot_uuid == "UNKNOWN":
                 raise AppError.translated("E501", "error.root_uuid_unavailable")
 
-            self.chroot.run_in_chroot(
+            self._run_chroot(
                 root_mount,
                 [
                     "/usr/sbin/grub-install",
@@ -30,8 +52,9 @@ class BootService:
                     "--recheck",
                     target_device,
                 ],
+                on_bind_cleanup_failure,
             )
-            self.chroot.run_in_chroot(
+            self._run_chroot(
                 root_mount,
                 [
                     "/usr/sbin/grub-install",
@@ -42,6 +65,7 @@ class BootService:
                     "--no-nvram",
                     "--removable",
                 ],
+                on_bind_cleanup_failure,
             )
             self._write_portable_grub_configs(root_mount, boot_uuid)
             self._ensure_portable_efi_bootloader(root_mount)
@@ -50,20 +74,34 @@ class BootService:
         except Exception as exc:
             raise AppError.translated("E501", "error.grub_config_failed", reason=str(exc)) from exc
 
-    def update_initramfs(self, root_mount: Path) -> None:
+    def update_initramfs(
+        self,
+        root_mount: Path,
+        *,
+        on_bind_cleanup_failure: Callable[[], None] | None = None,
+    ) -> None:
         try:
-            self.chroot.run_in_chroot(root_mount, ["/usr/sbin/update-initramfs", "-u"])
+            self._run_chroot(
+                root_mount, ["/usr/sbin/update-initramfs", "-u"],
+                on_bind_cleanup_failure,
+            )
         except AppError:
             raise
         except Exception as exc:
             raise AppError.translated("E502", "error.initramfs_update_failed", reason=str(exc)) from exc
 
-    def refresh_grub_config(self, root_mount: Path) -> None:
+    def refresh_grub_config(
+        self,
+        root_mount: Path,
+        *,
+        on_bind_cleanup_failure: Callable[[], None] | None = None,
+    ) -> None:
         try:
             self._ensure_portable_grub_defaults(root_mount)
-            self.chroot.run_in_chroot(
+            self._run_chroot(
                 root_mount,
                 ["/usr/sbin/grub-mkconfig", "-o", "/boot/grub/grub.cfg"],
+                on_bind_cleanup_failure,
             )
         except AppError:
             raise

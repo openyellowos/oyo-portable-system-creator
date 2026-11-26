@@ -4,6 +4,8 @@ import json
 import os
 import shutil
 import re
+import stat
+from pathlib import Path
 
 from src.core.errors import AppError
 from src.infra.command_runner import CommandRunner
@@ -15,11 +17,14 @@ REQUIRED_COMMANDS = [
     "blkid",
     "parted",
     "partprobe",
+    "dd",
+    "udevadm",
     "mkfs.vfat",
     "mkfs.ext4",
     "mount",
     "umount",
     "swapoff",
+    "systemd-inhibit",
     "chroot",
     "rsync",
     "grub-install",
@@ -78,6 +83,29 @@ class DeviceService:
             raise AppError.translated("E203", "error.system_disk_not_allowed")
         if target_device not in candidate_paths:
             raise AppError.translated("E201", "error.invalid_target_device")
+
+    def target_device_identity(self, target_device: str) -> dict[str, int | None]:
+        """Capture the selected block node identity for later destructive checks."""
+        try:
+            info = os.stat(target_device)
+        except OSError as exc:
+            raise AppError.translated("E201", "error.invalid_target_device") from exc
+        if not stat.S_ISBLK(info.st_mode):
+            raise AppError.translated("E201", "error.invalid_target_device")
+        major, minor = os.major(info.st_rdev), os.minor(info.st_rdev)
+        diskseq: int | None = None
+        diskseq_path = Path("/sys/dev/block") / f"{major}:{minor}" / "diskseq"
+        try:
+            diskseq = int(diskseq_path.read_text(encoding="ascii").strip())
+        except FileNotFoundError:
+            # Older kernels may not expose diskseq; MAJ:MIN still detects
+            # ordinary replacement and is checked against lsblk below.
+            pass
+        except (OSError, ValueError) as exc:
+            raise AppError.translated(
+                "E125", "error.mount_state_unknown", reason=f"could not read {diskseq_path}: {exc}"
+            ) from exc
+        return {"major": major, "minor": minor, "diskseq": diskseq}
 
     def estimate_required_bytes(self, copy_bytes: int) -> int:
         required = int(copy_bytes * 1.15) + (4 * 1024**3)
