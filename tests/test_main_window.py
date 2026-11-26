@@ -75,6 +75,10 @@ class MainWindowDeviceSelectionTests(unittest.TestCase):
 
         self.assertIn("コピー進捗 38%", ja("workflow.copy.progress", step=ja("workflow.copy.first"), progress=38))
         self.assertIn("38% copied", en("workflow.copy.progress", step=en("workflow.copy.first"), progress=38))
+        self.assertIn("処理中", ja("workflow.copy.estimate_reached", step=ja("workflow.copy.first")))
+        self.assertIn("continuing", en("workflow.copy.estimate_reached", step=en("workflow.copy.first")))
+        self.assertIn("ファイル確認中", ja("workflow.copy.verifying", step=ja("workflow.copy.second")))
+        self.assertIn("checking files", en("workflow.copy.verifying", step=en("workflow.copy.second")))
 
     def test_close_during_create_requests_safe_cancel_and_defers_close(self) -> None:
         class RunningThread:

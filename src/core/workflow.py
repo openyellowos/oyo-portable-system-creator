@@ -146,7 +146,6 @@ class Workflow:
                 source_path = str(state.metadata.get("source_path") or self.copy_service.resolve_source(mode, state.source_device))
                 self._rsync_copy_with_progress(state, source_path, root_mount, mode, 1)
                 self._check_cancelled()
-                self._update_progress(state, 55, self.translate("workflow.copy.second"))
                 self._rsync_copy_with_progress(state, source_path, root_mount, mode, 2)
                 self._check_cancelled()
 
@@ -281,16 +280,35 @@ class Workflow:
         self.logger.info(f"[{state.progress_percent:>3}%] {state.current_step}")
 
     def _copy_progress_callback(self, state: ExecutionState, pass_number: int) -> Callable[[int], None] | None:
-        if not state.progress_listeners:
+        if not state.progress_listeners or pass_number != 1:
             return None
-        start, width = (45, 9) if pass_number == 1 else (55, 4)
-        step_key = "workflow.copy.first" if pass_number == 1 else "workflow.copy.second"
+        estimated_bytes = state.metadata.get("copy_bytes")
+        if not isinstance(estimated_bytes, int) or estimated_bytes <= 0:
+            return None
+        start, width = 45, 9
+        step_key = "workflow.copy.first"
         base_step = self.translate(step_key)
-        last_copy_percent = 0
+        last_copy_percent = -1
+        last_transferred_bytes = 0
+        estimate_reached = False
 
-        def update(copy_percent: int) -> None:
-            nonlocal last_copy_percent
-            bounded = max(last_copy_percent, max(0, min(100, copy_percent)))
+        def update(transferred_bytes: int) -> None:
+            nonlocal last_copy_percent, last_transferred_bytes, estimate_reached
+            last_transferred_bytes = max(last_transferred_bytes, max(0, transferred_bytes))
+            # progress2's percentage uses rsync's incrementally growing total_size.
+            # Use the dry-run's fixed transferred-file-size estimate as the denominator
+            # instead, while reserving the final 1% for the process-completion boundary.
+            if last_transferred_bytes * 100 >= estimated_bytes * 99:
+                if not estimate_reached:
+                    estimate_reached = True
+                    overall = start + (98 * width // 100)
+                    step = self.translate("workflow.copy.estimate_reached", step=base_step)
+                    self._update_progress(state, overall, step)
+                return
+
+            bounded = min(98, (last_transferred_bytes * 100) // estimated_bytes)
+            if bounded == last_copy_percent:
+                return
             last_copy_percent = bounded
             overall = start + (bounded * width // 100)
             step = self.translate("workflow.copy.progress", step=base_step, progress=bounded)
@@ -299,11 +317,27 @@ class Workflow:
         return update
 
     def _rsync_copy_with_progress(self, state: ExecutionState, source: str, target: Path, mode: str, pass_number: int) -> None:
-        callback = self._copy_progress_callback(state, pass_number)
-        if callback is None:
-            self.copy_service.rsync_copy(source, target, mode)
-        else:
-            self.copy_service.rsync_copy(source, target, mode, progress_callback=callback)
+        if pass_number == 1:
+            callback = self._copy_progress_callback(state, pass_number)
+            if callback is None:
+                self.copy_service.rsync_copy(source, target, mode)
+            else:
+                self.copy_service.rsync_copy(source, target, mode, progress_callback=callback)
+            # The last estimated byte count is not proof of completion. Advance into
+            # the final portion only after rsync returned successfully.
+            self._update_progress(state, 54, self.translate("workflow.copy.first"))
+            return
+
+        second_step = self.translate("workflow.copy.second")
+        self._update_progress(
+            state,
+            55,
+            self.translate("workflow.copy.verifying", step=second_step),
+        )
+        # The second pass is mostly a comparison/metadata check, so byte progress is
+        # not a useful completion measure. Keep a stable, descriptive status instead.
+        self.copy_service.rsync_copy(source, target, mode)
+        self._update_progress(state, 59, second_step)
 
     def _blkid(self, part: str) -> str:
         result = self.device_service.runner.run(["blkid", "-s", "UUID", "-o", "value", part], check=False)

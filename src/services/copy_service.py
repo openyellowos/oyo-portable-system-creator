@@ -68,19 +68,20 @@ HOME_DIRS_COPY_FULL = [
 
 
 class RsyncProgressParser:
-    """Parse progress2's carriage-return updates without requiring line buffering."""
+    """Parse cumulative transferred file-size bytes from progress2 updates."""
 
-    _PERCENT = re.compile(
-        r"^\s*[0-9][0-9,]*(?:\.[0-9]+)?(?:[kMGTPE]?B)?\s+(100|[0-9]{1,2})%(?!\d)"
+    _PROGRESS = re.compile(
+        r"^\s*(?P<bytes>(?:[0-9]+|[0-9]{1,3}(?:[.,'’ \u00a0\u202f][0-9]{3})+))B?"
+        r"\s+(?P<percent>[0-9]{1,3})%(?!\d)"
     )
 
     def __init__(self, callback: Callable[[int], None], *, minimum_interval: float = 0.25) -> None:
         self.callback = callback
         self.minimum_interval = minimum_interval
         self._buffers = {"stdout": "", "stderr": ""}
-        self._observed_percent = -1
-        self._last_percent = -1
-        self._pending_percent: int | None = None
+        self._observed_bytes = -1
+        self._last_bytes = -1
+        self._pending_bytes: int | None = None
         self._last_emit = 0.0
 
     def feed(self, _stream: str, chunk: str) -> None:
@@ -97,35 +98,36 @@ class RsyncProgressParser:
             if line:
                 self._parse_line(line)
                 self._buffers[stream] = ""
-        if self._pending_percent is not None:
-            self._emit(self._pending_percent)
+        if self._pending_bytes is not None:
+            self._emit(self._pending_bytes)
 
     def _parse_line(self, line: str) -> None:
-        match = self._PERCENT.search(line)
+        match = self._PROGRESS.search(line)
         if match is None:
             return
-        percent = int(match.group(1))
+        percent = int(match.group("percent"))
         if not 0 <= percent <= 100:
             return
-        percent = max(percent, self._observed_percent)
-        self._observed_percent = percent
+        transferred_bytes = int(re.sub(r"[.,'’ \u00a0\u202f]", "", match.group("bytes")))
+        transferred_bytes = max(transferred_bytes, self._observed_bytes)
+        self._observed_bytes = transferred_bytes
         now = time.monotonic()
-        if percent == self._last_percent:
+        if transferred_bytes == self._last_bytes:
             return
-        self._pending_percent = max(percent, self._pending_percent or 0)
-        if percent != 100 and now - self._last_emit < self.minimum_interval:
+        self._pending_bytes = max(transferred_bytes, self._pending_bytes or 0)
+        if now - self._last_emit < self.minimum_interval:
             return
 
-        self._emit(self._pending_percent, now)
+        self._emit(self._pending_bytes, now)
 
-    def _emit(self, percent: int, now: float | None = None) -> None:
-        if percent <= self._last_percent:
-            self._pending_percent = None
+    def _emit(self, transferred_bytes: int, now: float | None = None) -> None:
+        if transferred_bytes <= self._last_bytes:
+            self._pending_bytes = None
             return
-        self._last_percent = percent
+        self._last_bytes = transferred_bytes
         self._last_emit = time.monotonic() if now is None else now
-        self.callback(percent)
-        self._pending_percent = None
+        self.callback(transferred_bytes)
+        self._pending_bytes = None
 
 
 class CopyService:
