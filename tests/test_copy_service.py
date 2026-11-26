@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from src.services.copy_service import CopyService, RsyncProgressParser
 
@@ -83,6 +84,28 @@ class CopyServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(progress, [42])
+
+    def test_progress_parser_emits_throttled_value_when_same_record_repeats(self) -> None:
+        progress: list[int] = []
+        parser = RsyncProgressParser(progress.append, minimum_interval=0.25)
+
+        with patch("src.services.copy_service.time.monotonic", side_effect=[10.0, 10.1, 10.5]):
+            parser.feed("stderr", "1,000B 1% 1.0MB/s 0:10\r")
+            parser.feed("stderr", "50,000B 50% 1.0MB/s 0:05\r")
+            parser.feed("stderr", "50,000B 50% 1.0MB/s 0:05\r")
+
+        self.assertEqual(progress, [1, 50])
+
+    def test_progress_parser_flushes_pending_value_when_stream_finishes(self) -> None:
+        progress: list[int] = []
+        parser = RsyncProgressParser(progress.append, minimum_interval=0.25)
+
+        with patch("src.services.copy_service.time.monotonic", side_effect=[10.0, 10.1, 10.2]):
+            parser.feed("stderr", "1,000B 1% 1.0MB/s 0:10\r")
+            parser.feed("stderr", "50,000B 50% 1.0MB/s 0:05\r")
+            parser.finish()
+
+        self.assertEqual(progress, [1, 50])
 
     def test_rsync_copy_requests_progress_only_when_callback_is_available(self) -> None:
         class Runner:

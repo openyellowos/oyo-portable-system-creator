@@ -5,6 +5,7 @@ import threading
 import time
 import sys
 import os
+import selectors
 import signal
 import subprocess
 import tempfile
@@ -50,6 +51,76 @@ class CommandRunnerTests(unittest.TestCase):
         self.assertIn("38%", result.stderr)
         self.assertTrue(any(name == "stderr" and "3" in text for name, text in received))
         self.assertTrue(any(name == "stdout" and "copy complete" in text for name, text in received))
+
+    def test_streaming_setup_and_read_failures_stop_the_started_process_group(self) -> None:
+        for failure_point in ("setup", "read"):
+            with self.subTest(failure_point=failure_point), tempfile.TemporaryDirectory() as tmpdir:
+                runner = CommandRunner(DummyLogger())
+                runner.TERMINATION_GRACE_SECONDS = 0.25
+                pid_file = Path(tmpdir) / "command.pid"
+                ready_file = Path(tmpdir) / "command.ready"
+                script = (
+                    "import os, time; "
+                    f"open({str(ready_file)!r}, 'w').write('ready'); "
+                    "time.sleep(30)"
+                )
+                original_popen = subprocess.Popen
+
+                def capture_process(*args, **kwargs):
+                    process = original_popen(*args, **kwargs)
+                    pid_file.write_text(str(process.pid), encoding="ascii")
+                    return process
+
+                def wait_until_ready() -> None:
+                    deadline = time.monotonic() + 5
+                    while not ready_file.exists() and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    if not ready_file.exists():
+                        raise AssertionError("test command did not start before failure injection")
+
+                if failure_point == "setup":
+                    def selector_factory():
+                        wait_until_ready()
+                        raise OSError("EMFILE injected")
+                else:
+                    real_selector_factory = selectors.DefaultSelector
+
+                    class FailingSelector:
+                        def __init__(self) -> None:
+                            self._selector = real_selector_factory()
+
+                        def __getattr__(self, name):
+                            return getattr(self._selector, name)
+
+                        def select(self, timeout=None):
+                            wait_until_ready()
+                            raise OSError("EIO injected")
+
+                    selector_factory = FailingSelector
+
+                try:
+                    with patch("src.infra.command_runner.subprocess.Popen", new=capture_process):
+                        with patch("src.infra.command_runner.selectors.DefaultSelector", new=selector_factory):
+                            with self.assertRaisesRegex(OSError, "injected"):
+                                runner.run(
+                                    [sys.executable, "-c", script],
+                                    output_callback=lambda _stream, _text: None,
+                                )
+                    self.assertTrue(pid_file.exists(), "command must have started before the injected failure")
+                    self.assertTrue(ready_file.exists(), "failure must happen after the command has started")
+                    process_group_id = int(pid_file.read_text(encoding="ascii"))
+                    self.assertFalse(
+                        runner._process_group_alive(process_group_id),
+                        "streaming failure must terminate the complete process group before returning",
+                    )
+                finally:
+                    if pid_file.exists():
+                        process_group_id = int(pid_file.read_text(encoding="ascii"))
+                        if runner._process_group_alive(process_group_id):
+                            try:
+                                os.killpg(process_group_id, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
 
     def test_streaming_mode_stops_descendant_holding_pipes_after_leader_exit(self) -> None:
         runner = CommandRunner(DummyLogger())

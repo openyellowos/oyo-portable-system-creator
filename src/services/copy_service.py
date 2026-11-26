@@ -78,7 +78,9 @@ class RsyncProgressParser:
         self.callback = callback
         self.minimum_interval = minimum_interval
         self._buffers = {"stdout": "", "stderr": ""}
+        self._observed_percent = -1
         self._last_percent = -1
+        self._pending_percent: int | None = None
         self._last_emit = 0.0
 
     def feed(self, _stream: str, chunk: str) -> None:
@@ -95,6 +97,8 @@ class RsyncProgressParser:
             if line:
                 self._parse_line(line)
                 self._buffers[stream] = ""
+        if self._pending_percent is not None:
+            self._emit(self._pending_percent)
 
     def _parse_line(self, line: str) -> None:
         match = self._PERCENT.search(line)
@@ -103,16 +107,25 @@ class RsyncProgressParser:
         percent = int(match.group(1))
         if not 0 <= percent <= 100:
             return
-        percent = max(percent, self._last_percent)
+        percent = max(percent, self._observed_percent)
+        self._observed_percent = percent
         now = time.monotonic()
         if percent == self._last_percent:
             return
+        self._pending_percent = max(percent, self._pending_percent or 0)
         if percent != 100 and now - self._last_emit < self.minimum_interval:
-            self._last_percent = percent
+            return
+
+        self._emit(self._pending_percent, now)
+
+    def _emit(self, percent: int, now: float | None = None) -> None:
+        if percent <= self._last_percent:
+            self._pending_percent = None
             return
         self._last_percent = percent
-        self._last_emit = now
+        self._last_emit = time.monotonic() if now is None else now
         self.callback(percent)
+        self._pending_percent = None
 
 
 class CopyService:

@@ -150,18 +150,10 @@ class CommandRunner:
             cwd=cwd,
             start_new_session=True,
         )
-        assert process.stdout is not None and process.stderr is not None
-        selector = selectors.DefaultSelector()
-        streams = {"stdout": process.stdout, "stderr": process.stderr}
-        output: dict[str, bytearray] = {name: bytearray() for name in streams}
-        decoders = {
-            name: codecs.getincrementaldecoder("utf-8")(errors="replace")
-            for name in streams
-        }
-        for name, stream in streams.items():
-            os.set_blocking(stream.fileno(), False)
-            selector.register(stream, selectors.EVENT_READ, name)
-
+        selector: selectors.BaseSelector | None = None
+        output: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
+        streams = {}
+        decoders = {}
         terminated_at: float | None = None
         leader_exited_at: float | None = None
         kill_sent = False
@@ -196,6 +188,20 @@ class CommandRunner:
                 terminated_at = time.monotonic()
 
         try:
+            # Selector creation and registration happen after Popen has started
+            # the command. Keep them under the same ownership guard as reads so
+            # any setup failure stops/reaps the complete command group.
+            assert process.stdout is not None and process.stderr is not None
+            streams = {"stdout": process.stdout, "stderr": process.stderr}
+            decoders = {
+                name: codecs.getincrementaldecoder("utf-8")(errors="replace")
+                for name in streams
+            }
+            selector = selectors.DefaultSelector()
+            for name, stream in streams.items():
+                os.set_blocking(stream.fileno(), False)
+                selector.register(stream, selectors.EVENT_READ, name)
+
             while True:
                 if not self._ignore_cancel and self.cancel_event is not None and self.cancel_event.is_set():
                     cancelled = True
@@ -264,28 +270,22 @@ class CommandRunner:
                     break
         except KeyboardInterrupt:
             interrupted = True
-            request_termination()
-            while process.poll() is None or self._process_group_alive(process.pid) or selector.get_map():
-                request_termination()
-                now = time.monotonic()
-                if not kill_sent and terminated_at is not None and now - terminated_at >= self.TERMINATION_GRACE_SECONDS:
-                    signal_group(signal.SIGKILL, "SIGKILL")
-                    kill_sent = True
-                for key, _mask in selector.select(timeout=0.2):
-                    stream = key.fileobj
-                    try:
-                        chunk = os.read(stream.fileno(), 65536)
-                    except BlockingIOError:
-                        continue
-                    if not chunk:
-                        selector.unregister(stream)
-                    else:
-                        output[key.data].extend(chunk)
+            self._terminate_and_reap(process)
+        except BaseException:
+            # Unexpected selector/read failures must not hand control back to
+            # the workflow while rsync or one of its descendants can still
+            # write to the target. This intentionally waits if the process
+            # group cannot be confirmed stopped.
+            self._terminate_and_reap(process)
+            raise
 
         finally:
-            selector.close()
-            process.stdout.close()
-            process.stderr.close()
+            if selector is not None:
+                selector.close()
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
 
         if not self._ignore_cancel and self.cancel_event is not None and self.cancel_event.is_set():
             cancelled = True
