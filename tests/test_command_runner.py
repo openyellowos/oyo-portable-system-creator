@@ -31,6 +31,119 @@ class CommandRunnerTests(unittest.TestCase):
 
         self.assertEqual(sanitized, "Discarding device blocks:\n0/31126784done\nnext line")
 
+    def test_streaming_output_delivers_split_pipe_chunks_and_keeps_capture(self) -> None:
+        runner = CommandRunner(DummyLogger())
+        received: list[tuple[str, str]] = []
+        script = (
+            "import os, time; os.write(2, b'123,456B 3'); time.sleep(.05); "
+            "os.write(2, b'8% 1.2MB/s 0:04\\r'); "
+            "os.write(1, b'copy complete\\n')"
+        )
+
+        result = runner.run(
+            [sys.executable, "-c", script],
+            output_callback=lambda stream, text: received.append((stream, text)),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("copy complete", result.stdout)
+        self.assertIn("38%", result.stderr)
+        self.assertTrue(any(name == "stderr" and "3" in text for name, text in received))
+        self.assertTrue(any(name == "stdout" and "copy complete" in text for name, text in received))
+
+    def test_streaming_mode_stops_descendant_holding_pipes_after_leader_exit(self) -> None:
+        runner = CommandRunner(DummyLogger())
+        runner.TERMINATION_GRACE_SECONDS = 0.25
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pid_file = Path(tmpdir) / "child.pid"
+            child_code = (
+                "import os, signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                f"open({str(pid_file)!r}, 'w').write(str(os.getpid())); time.sleep(30)"
+            )
+            parent_code = f"import subprocess, sys; subprocess.Popen([sys.executable, '-c', {child_code!r}])"
+            outcome: list[BaseException] = []
+
+            def run_command() -> None:
+                try:
+                    runner.run(
+                        [sys.executable, "-c", parent_code],
+                        output_callback=lambda _stream, _text: None,
+                    )
+                except BaseException as exc:
+                    outcome.append(exc)
+
+            thread = threading.Thread(target=run_command)
+            thread.start()
+            deadline = time.monotonic() + 5
+            while not pid_file.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(pid_file.exists(), "descendant did not start")
+            child_pid = int(pid_file.read_text(encoding="ascii"))
+            pgid = os.getpgid(child_pid)
+            thread.join(4)
+            completed_before_fallback = not thread.is_alive()
+            if thread.is_alive():
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                thread.join(3)
+
+        self.assertTrue(completed_before_fallback, "runner must stop inherited-pipe descendants")
+        self.assertFalse(thread.is_alive(), "test cleanup must not leave a runner behind")
+        self.assertEqual(outcome, [])
+        self.assertFalse(self._pid_is_running(child_pid))
+
+    def test_streaming_cancellation_stops_the_command_group_before_return(self) -> None:
+        cancel_event = threading.Event()
+        runner = CommandRunner(DummyLogger(), cancel_event=cancel_event)
+        runner.TERMINATION_GRACE_SECONDS = 0.25
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pid_file = Path(tmpdir) / "child.pid"
+            child_code = (
+                "import os, signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                f"open({str(pid_file)!r}, 'w').write(str(os.getpid())); time.sleep(30)"
+            )
+            parent_code = (
+                "import subprocess, sys, time; "
+                f"subprocess.Popen([sys.executable, '-c', {child_code!r}]); time.sleep(30)"
+            )
+            outcome: list[BaseException] = []
+
+            def run_command() -> None:
+                try:
+                    runner.run(
+                        [sys.executable, "-c", parent_code],
+                        output_callback=lambda _stream, _text: None,
+                    )
+                except BaseException as exc:
+                    outcome.append(exc)
+
+            thread = threading.Thread(target=run_command)
+            thread.start()
+            deadline = time.monotonic() + 5
+            while not pid_file.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(pid_file.exists(), "descendant did not start")
+            child_pid = int(pid_file.read_text(encoding="ascii"))
+            pgid = os.getpgid(child_pid)
+            cancel_event.set()
+            thread.join(4)
+            completed_before_fallback = not thread.is_alive()
+            if thread.is_alive():
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                thread.join(3)
+
+        self.assertTrue(completed_before_fallback, "cancel must wait for group termination")
+        self.assertFalse(thread.is_alive(), "test cleanup must not leave a runner behind")
+        self.assertEqual(len(outcome), 1)
+        self.assertIsInstance(outcome[0], AppError)
+        self.assertEqual(outcome[0].code, "E123")  # type: ignore[union-attr]
+        self.assertFalse(self._pid_is_running(child_pid))
+
     def test_cancellation_terminates_and_reaps_external_command(self) -> None:
         cancel_event = threading.Event()
         runner = CommandRunner(DummyLogger(), cancel_event=cancel_event)

@@ -144,10 +144,10 @@ class Workflow:
                 self._check_cancelled()
                 self._update_progress(state, 45, self.translate("workflow.copy.first"))
                 source_path = str(state.metadata.get("source_path") or self.copy_service.resolve_source(mode, state.source_device))
-                self.copy_service.rsync_copy(source_path, root_mount, mode)
+                self._rsync_copy_with_progress(state, source_path, root_mount, mode, 1)
                 self._check_cancelled()
                 self._update_progress(state, 55, self.translate("workflow.copy.second"))
-                self.copy_service.rsync_copy(source_path, root_mount, mode)
+                self._rsync_copy_with_progress(state, source_path, root_mount, mode, 2)
                 self._check_cancelled()
 
                 efi_mount = self.partition_service.mount_efi_partition(efi, root_mount, on_mount_attempt=register_mount_attempt)
@@ -275,8 +275,35 @@ class Workflow:
             )
 
     def _update_progress(self, state: ExecutionState, percent: int, step: str) -> None:
-        state.set_progress(percent, step)
+        # Progress values are user-visible estimates; never let a late or
+        # incremental-crawl update move the overall indicator backwards.
+        state.set_progress(max(state.progress_percent, percent), step)
         self.logger.info(f"[{state.progress_percent:>3}%] {state.current_step}")
+
+    def _copy_progress_callback(self, state: ExecutionState, pass_number: int) -> Callable[[int], None] | None:
+        if not state.progress_listeners:
+            return None
+        start, width = (45, 9) if pass_number == 1 else (55, 4)
+        step_key = "workflow.copy.first" if pass_number == 1 else "workflow.copy.second"
+        base_step = self.translate(step_key)
+        last_copy_percent = 0
+
+        def update(copy_percent: int) -> None:
+            nonlocal last_copy_percent
+            bounded = max(last_copy_percent, max(0, min(100, copy_percent)))
+            last_copy_percent = bounded
+            overall = start + (bounded * width // 100)
+            step = self.translate("workflow.copy.progress", step=base_step, progress=bounded)
+            self._update_progress(state, overall, step)
+
+        return update
+
+    def _rsync_copy_with_progress(self, state: ExecutionState, source: str, target: Path, mode: str, pass_number: int) -> None:
+        callback = self._copy_progress_callback(state, pass_number)
+        if callback is None:
+            self.copy_service.rsync_copy(source, target, mode)
+        else:
+            self.copy_service.rsync_copy(source, target, mode, progress_callback=callback)
 
     def _blkid(self, part: str) -> str:
         result = self.device_service.runner.run(["blkid", "-s", "UUID", "-o", "value", part], check=False)

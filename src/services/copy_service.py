@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 import re
 import tempfile
+import time
 from pathlib import Path
 
 from src.core.errors import AppError
@@ -65,6 +67,54 @@ HOME_DIRS_COPY_FULL = [
 ]
 
 
+class RsyncProgressParser:
+    """Parse progress2's carriage-return updates without requiring line buffering."""
+
+    _PERCENT = re.compile(
+        r"^\s*[0-9][0-9,]*(?:\.[0-9]+)?(?:[kMGTPE]?B)?\s+(100|[0-9]{1,2})%(?!\d)"
+    )
+
+    def __init__(self, callback: Callable[[int], None], *, minimum_interval: float = 0.25) -> None:
+        self.callback = callback
+        self.minimum_interval = minimum_interval
+        self._buffers = {"stdout": "", "stderr": ""}
+        self._last_percent = -1
+        self._last_emit = 0.0
+
+    def feed(self, _stream: str, chunk: str) -> None:
+        if _stream not in self._buffers or not chunk:
+            return
+        buffer = self._buffers[_stream] + chunk
+        lines = re.split(r"[\r\n]", buffer)
+        self._buffers[_stream] = lines.pop()
+        for line in lines:
+            self._parse_line(line)
+
+    def finish(self) -> None:
+        for stream, line in self._buffers.items():
+            if line:
+                self._parse_line(line)
+                self._buffers[stream] = ""
+
+    def _parse_line(self, line: str) -> None:
+        match = self._PERCENT.search(line)
+        if match is None:
+            return
+        percent = int(match.group(1))
+        if not 0 <= percent <= 100:
+            return
+        percent = max(percent, self._last_percent)
+        now = time.monotonic()
+        if percent == self._last_percent:
+            return
+        if percent != 100 and now - self._last_emit < self.minimum_interval:
+            self._last_percent = percent
+            return
+        self._last_percent = percent
+        self._last_emit = now
+        self.callback(percent)
+
+
 class CopyService:
     def __init__(self, runner: CommandRunner) -> None:
         self.runner = runner
@@ -109,9 +159,23 @@ class CopyService:
             raise AppError.translated("E401", "error.rsync_dry_run_failed")
         return self._parse_total_transferred_file_size(result.stdout, result.stderr)
 
-    def rsync_copy(self, source: str, target_root: Path, mode: str) -> None:
+    def rsync_copy(
+        self,
+        source: str,
+        target_root: Path,
+        mode: str,
+        progress_callback: Callable[[int], None] | None = None,
+    ) -> None:
         command = self._build_rsync_command(source, str(target_root), mode=mode)
-        result = self.runner.run(command, check=False)
+        output_callback = None
+        if progress_callback is not None:
+            command.append("--info=progress2")
+            parser = RsyncProgressParser(progress_callback)
+            output_callback = parser.feed
+            result = self.runner.run(command, check=False, output_callback=output_callback)
+            parser.finish()
+        else:
+            result = self.runner.run(command, check=False)
         if result.returncode != 0:
             raise AppError.translated("E401", "error.rsync_failed")
 

@@ -214,6 +214,25 @@ class WorkflowTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tempdir.cleanup()
 
+    def test_copy_progress_maps_each_rsync_pass_and_never_moves_backwards(self) -> None:
+        state = ExecutionState(mode="create", target_device="/dev/sdz")
+        updates: list[tuple[int, str]] = []
+        state.add_progress_listener(lambda percent, step: updates.append((percent, step)))
+
+        first = self.workflow._copy_progress_callback(state, 1)
+        second = self.workflow._copy_progress_callback(state, 2)
+        assert first is not None and second is not None
+        for percent in (0, 50, 100, 25):
+            first(percent)
+        for percent in (0, 50, 100):
+            second(percent)
+
+        self.assertEqual([percent for percent, _ in updates], [45, 49, 54, 54, 55, 57, 59])
+        self.assertIn("(1/2)", updates[1][1])
+        self.assertIn("50%", updates[1][1])
+        self.assertIn("(2/2)", updates[-1][1])
+        self.assertTrue(all(a <= b for a, b in zip((v[0] for v in updates), (v[0] for v in updates[1:]))))
+
     def test_precheck_runs_before_target_preparation(self) -> None:
         events: list[str] = []
         self.workflow.precheck = lambda state: events.append("precheck")  # type: ignore[method-assign]
