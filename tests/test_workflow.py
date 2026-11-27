@@ -232,7 +232,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual([percent for percent, _ in updates], [45, 49, 53, 53])
         self.assertIn("(1/2)", updates[1][1])
         self.assertIn("50%", updates[1][1])
-        self.assertIn("見積量の大半", updates[-1][1])
+        self.assertIn("データ転送は終盤です。処理を継続中…", updates[-1][1])
         self.assertNotIn("100%", " ".join(step for _, step in updates))
         self.assertTrue(all(a <= b for a, b in zip((v[0] for v in updates), (v[0] for v in updates[1:]))))
 

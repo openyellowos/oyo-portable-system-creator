@@ -75,8 +75,16 @@ class MainWindowDeviceSelectionTests(unittest.TestCase):
 
         self.assertIn("コピー進捗 38%", ja("workflow.copy.progress", step=ja("workflow.copy.first"), progress=38))
         self.assertIn("38% copied", en("workflow.copy.progress", step=en("workflow.copy.first"), progress=38))
-        self.assertIn("処理中", ja("workflow.copy.estimate_reached", step=ja("workflow.copy.first")))
-        self.assertIn("continuing", en("workflow.copy.estimate_reached", step=en("workflow.copy.first")))
+        self.assertEqual(
+            ja("workflow.copy.estimate_reached", step=ja("workflow.copy.first")),
+            "システムをコピー (1/2) — データ転送は終盤です。処理を継続中…",
+        )
+        self.assertEqual(
+            en("workflow.copy.estimate_reached", step=en("workflow.copy.first")),
+            "Copying system (1/2) — most estimated data sent; continuing…",
+        )
+        self.assertEqual(ja("workflow.optimize"), "USBでの利用に合わせて設定")
+        self.assertEqual(en("workflow.optimize"), "Applying portable optimizations")
         self.assertIn("コピー処理中", ja("workflow.copy.processing", step=ja("workflow.copy.first")))
         self.assertIn("rsync is working", en("workflow.copy.processing", step=en("workflow.copy.first")))
         self.assertIn("ファイル確認中", ja("workflow.copy.verifying", step=ja("workflow.copy.second")))
