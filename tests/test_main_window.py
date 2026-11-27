@@ -3,10 +3,11 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QProgressBar
 from PyQt6.QtGui import QCloseEvent
 
 from src.gui.main_window import CreateWorker, MainWindow
+from src.gui.i18n import build_translator
 
 
 class MainWindowPasswordValidationTests(unittest.TestCase):
@@ -58,6 +59,36 @@ class MainWindowDeviceSelectionTests(unittest.TestCase):
         self.assertEqual(self.window.progress_bar.value(), 20)
         self.assertEqual(self.window.status_label.text(), "パーティションを作成")
         self.assertEqual(self.window.log_view.toPlainText().splitlines(), ["existing"])
+
+    def test_copy_progress_uses_existing_status_label_and_single_progress_bar(self) -> None:
+        self.window._on_progress(48, "システムをコピー (1/2) — コピー進捗 38%")
+
+        self.assertEqual(self.window.progress_bar.value(), 48)
+        self.assertEqual(self.window.status_label.text(), "システムをコピー (1/2) — コピー進捗 38%")
+        self.assertEqual(len(self.window.findChildren(QProgressBar)), 1)
+        self.assertEqual(self.window.minimumSize().width(), 920)
+        self.assertEqual(self.window.minimumSize().height(), 620)
+
+    def test_copy_progress_text_is_translated_in_japanese_and_english(self) -> None:
+        ja = build_translator("ja")
+        en = build_translator("en")
+
+        self.assertIn("コピー進捗 38%", ja("workflow.copy.progress", step=ja("workflow.copy.first"), progress=38))
+        self.assertIn("38% copied", en("workflow.copy.progress", step=en("workflow.copy.first"), progress=38))
+        self.assertEqual(
+            ja("workflow.copy.estimate_reached", step=ja("workflow.copy.first")),
+            "システムをコピー (1/2) — データ転送は終盤です。処理を継続中…",
+        )
+        self.assertEqual(
+            en("workflow.copy.estimate_reached", step=en("workflow.copy.first")),
+            "Copying system (1/2) — most estimated data sent; continuing…",
+        )
+        self.assertEqual(ja("workflow.optimize"), "USBでの利用に合わせて設定")
+        self.assertEqual(en("workflow.optimize"), "Applying portable optimizations")
+        self.assertIn("コピー処理中", ja("workflow.copy.processing", step=ja("workflow.copy.first")))
+        self.assertIn("rsync is working", en("workflow.copy.processing", step=en("workflow.copy.first")))
+        self.assertIn("ファイル確認中", ja("workflow.copy.verifying", step=ja("workflow.copy.second")))
+        self.assertIn("checking files", en("workflow.copy.verifying", step=en("workflow.copy.second")))
 
     def test_close_during_create_requests_safe_cancel_and_defers_close(self) -> None:
         class RunningThread:

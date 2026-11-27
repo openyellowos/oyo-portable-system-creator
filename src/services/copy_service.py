@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 import re
 import tempfile
+import time
 from pathlib import Path
 
 from src.core.errors import AppError
@@ -65,6 +67,67 @@ HOME_DIRS_COPY_FULL = [
 ]
 
 
+class RsyncProgressParser:
+    """Parse cumulative transferred-file bytes, including unchanged activity samples."""
+
+    _PROGRESS = re.compile(
+        r"^\s*(?P<bytes>(?:[0-9]+|[0-9]{1,3}(?:[.,'’ \u00a0\u202f][0-9]{3})+))B?"
+        r"\s+(?P<percent>[0-9]{1,3})%(?!\d)"
+    )
+
+    def __init__(self, callback: Callable[[int], None], *, minimum_interval: float = 0.25) -> None:
+        self.callback = callback
+        self.minimum_interval = minimum_interval
+        self._buffers = {"stdout": "", "stderr": ""}
+        self._observed_bytes = -1
+        self._last_bytes = -1
+        self._pending_bytes: int | None = None
+        self._last_emit = 0.0
+
+    def feed(self, _stream: str, chunk: str) -> None:
+        if _stream not in self._buffers or not chunk:
+            return
+        buffer = self._buffers[_stream] + chunk
+        lines = re.split(r"[\r\n]", buffer)
+        self._buffers[_stream] = lines.pop()
+        for line in lines:
+            self._parse_line(line)
+
+    def finish(self) -> None:
+        for stream, line in self._buffers.items():
+            if line:
+                self._parse_line(line)
+                self._buffers[stream] = ""
+        if self._pending_bytes is not None:
+            self._emit(self._pending_bytes)
+
+    def _parse_line(self, line: str) -> None:
+        match = self._PROGRESS.search(line)
+        if match is None:
+            return
+        percent = int(match.group("percent"))
+        if not 0 <= percent <= 100:
+            return
+        transferred_bytes = int(re.sub(r"[.,'’ \u00a0\u202f]", "", match.group("bytes")))
+        transferred_bytes = max(transferred_bytes, self._observed_bytes)
+        self._observed_bytes = transferred_bytes
+        now = time.monotonic()
+        self._pending_bytes = max(transferred_bytes, self._pending_bytes or 0)
+        if now - self._last_emit < self.minimum_interval:
+            return
+
+        self._emit(self._pending_bytes, now)
+
+    def _emit(self, transferred_bytes: int, now: float | None = None) -> None:
+        if transferred_bytes < self._last_bytes:
+            self._pending_bytes = None
+            return
+        self._last_bytes = transferred_bytes
+        self._last_emit = time.monotonic() if now is None else now
+        self.callback(transferred_bytes)
+        self._pending_bytes = None
+
+
 class CopyService:
     def __init__(self, runner: CommandRunner) -> None:
         self.runner = runner
@@ -109,9 +172,23 @@ class CopyService:
             raise AppError.translated("E401", "error.rsync_dry_run_failed")
         return self._parse_total_transferred_file_size(result.stdout, result.stderr)
 
-    def rsync_copy(self, source: str, target_root: Path, mode: str) -> None:
+    def rsync_copy(
+        self,
+        source: str,
+        target_root: Path,
+        mode: str,
+        progress_callback: Callable[[int], None] | None = None,
+    ) -> None:
         command = self._build_rsync_command(source, str(target_root), mode=mode)
-        result = self.runner.run(command, check=False)
+        output_callback = None
+        if progress_callback is not None:
+            command.append("--info=progress2")
+            parser = RsyncProgressParser(progress_callback)
+            output_callback = parser.feed
+            result = self.runner.run(command, check=False, output_callback=output_callback)
+            parser.finish()
+        else:
+            result = self.runner.run(command, check=False)
         if result.returncode != 0:
             raise AppError.translated("E401", "error.rsync_failed")
 

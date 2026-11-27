@@ -5,6 +5,7 @@ import threading
 import time
 import sys
 import os
+import selectors
 import signal
 import subprocess
 import tempfile
@@ -22,6 +23,9 @@ class DummyLogger:
     def debug(self, msg: str) -> None:
         self.messages.append(msg)
 
+    def error(self, msg: str) -> None:
+        self.messages.append(msg)
+
 
 class CommandRunnerTests(unittest.TestCase):
     def test_sanitize_output_for_log_removes_control_characters(self) -> None:
@@ -30,6 +34,414 @@ class CommandRunnerTests(unittest.TestCase):
         sanitized = CommandRunner._sanitize_output_for_log(text)
 
         self.assertEqual(sanitized, "Discarding device blocks:\n0/31126784done\nnext line")
+
+    def test_streaming_output_delivers_split_pipe_chunks_and_keeps_capture(self) -> None:
+        runner = CommandRunner(DummyLogger())
+        received: list[tuple[str, str]] = []
+        script = (
+            "import os, time; os.write(2, b'123,456B 3'); time.sleep(.05); "
+            "os.write(2, b'8% 1.2MB/s 0:04\\r'); "
+            "os.write(1, b'copy complete\\n')"
+        )
+
+        result = runner.run(
+            [sys.executable, "-c", script],
+            output_callback=lambda stream, text: received.append((stream, text)),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("copy complete", result.stdout)
+        self.assertIn("38%", result.stderr)
+        self.assertTrue(any(name == "stderr" and "3" in text for name, text in received))
+        self.assertTrue(any(name == "stdout" and "copy complete" in text for name, text in received))
+
+    def test_streaming_setup_and_read_failures_stop_the_started_process_group(self) -> None:
+        for failure_point in ("setup", "select", "read"):
+            with self.subTest(failure_point=failure_point), tempfile.TemporaryDirectory() as tmpdir:
+                runner = CommandRunner(DummyLogger())
+                runner.TERMINATION_GRACE_SECONDS = 0.25
+                pid_file = Path(tmpdir) / "command.pid"
+                ready_file = Path(tmpdir) / "command.ready"
+                if failure_point == "read":
+                    script = (
+                        "import os, signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                        f"open({str(ready_file)!r}, 'w').write('ready'); "
+                        "os.write(1, b'ready\\n'); time.sleep(30)"
+                    )
+                else:
+                    script = (
+                        "import os, time; "
+                        f"open({str(ready_file)!r}, 'w').write('ready'); "
+                        "time.sleep(30)"
+                    )
+                stdout_fd: list[int] = []
+                original_popen = subprocess.Popen
+
+                def capture_process(*args, **kwargs):
+                    process = original_popen(*args, **kwargs)
+                    pid_file.write_text(str(process.pid), encoding="ascii")
+                    if process.stdout is not None:
+                        stdout_fd.append(process.stdout.fileno())
+                    return process
+
+                def wait_until_ready() -> None:
+                    deadline = time.monotonic() + 5
+                    while not ready_file.exists() and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    if not ready_file.exists():
+                        raise AssertionError("test command did not start before failure injection")
+
+                if failure_point == "setup":
+                    def selector_factory():
+                        wait_until_ready()
+                        raise OSError("EMFILE injected")
+                elif failure_point == "select":
+                    real_selector_factory = selectors.DefaultSelector
+
+                    class FailingSelector:
+                        def __init__(self) -> None:
+                            self._selector = real_selector_factory()
+
+                        def __getattr__(self, name):
+                            return getattr(self._selector, name)
+
+                        def select(self, timeout=None):
+                            wait_until_ready()
+                            raise OSError("EIO injected")
+
+                    selector_factory = FailingSelector
+                else:
+                    selector_factory = selectors.DefaultSelector
+
+                real_os_read = os.read
+                read_failure_injected = False
+
+                def failing_read(fd: int, size: int) -> bytes:
+                    nonlocal read_failure_injected
+                    if stdout_fd and fd == stdout_fd[0]:
+                        wait_until_ready()
+                        if not read_failure_injected:
+                            read_failure_injected = True
+                            raise OSError(5, "EIO injected")
+                    return real_os_read(fd, size)
+
+                try:
+                    with patch("src.infra.command_runner.subprocess.Popen", new=capture_process):
+                        with patch("src.infra.command_runner.selectors.DefaultSelector", new=selector_factory):
+                            if failure_point == "read":
+                                with patch("src.infra.command_runner.os.read", side_effect=failing_read):
+                                    with self.assertRaisesRegex(OSError, "injected"):
+                                        runner.run(
+                                            [sys.executable, "-c", script],
+                                            output_callback=lambda _stream, _text: None,
+                                        )
+                            else:
+                                with self.assertRaisesRegex(OSError, "injected"):
+                                    runner.run(
+                                        [sys.executable, "-c", script],
+                                        output_callback=lambda _stream, _text: None,
+                                    )
+                    self.assertTrue(pid_file.exists(), "command must have started before the injected failure")
+                    self.assertTrue(ready_file.exists(), "failure must happen after the command has started")
+                    process_group_id = int(pid_file.read_text(encoding="ascii"))
+                    self.assertFalse(
+                        runner._process_group_alive(process_group_id),
+                        "streaming failure must terminate the complete process group before returning",
+                    )
+                finally:
+                    if pid_file.exists():
+                        process_group_id = int(pid_file.read_text(encoding="ascii"))
+                        if runner._process_group_alive(process_group_id):
+                            try:
+                                os.killpg(process_group_id, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+
+    def test_streaming_setup_failure_waits_for_detached_pipe_holder_before_returning(self) -> None:
+        stalled = threading.Event()
+        stall_messages: list[str] = []
+        runner = CommandRunner(
+            DummyLogger(),
+            cancel_stalled_callback=lambda reason: (stall_messages.append(reason), stalled.set()),
+        )
+        runner.TERMINATION_GRACE_SECONDS = 0.1
+        runner.PIPE_EOF_STALL_SECONDS = 0.15
+        outcome: list[BaseException] = []
+        managed_processes: list[subprocess.Popen[str]] = []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pid_file = Path(tmpdir) / "detached-child.pid"
+            release_file = Path(tmpdir) / "release-child"
+            child_code = (
+                "import os, time\n"
+                f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
+                f"release = {str(release_file)!r}\n"
+                "deadline = time.monotonic() + 20\n"
+                "while not os.path.exists(release) and time.monotonic() < deadline:\n"
+                "    time.sleep(.01)\n"
+            )
+            parent_code = (
+                "import os, subprocess, sys, time\n"
+                f"subprocess.Popen([sys.executable, '-c', {child_code!r}], start_new_session=True)\n"
+                "deadline = time.monotonic() + 5\n"
+                f"while not os.path.exists({str(pid_file)!r}) and time.monotonic() < deadline:\n"
+                "    time.sleep(.01)\n"
+            )
+            original_popen = subprocess.Popen
+
+            def capture_process(*args, **kwargs):
+                process = original_popen(*args, **kwargs)
+                managed_processes.append(process)
+                return process
+
+            def selector_factory():
+                deadline = time.monotonic() + 5
+                while not pid_file.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                if not pid_file.exists():
+                    raise AssertionError("detached pipe holder did not start before selector failure")
+                raise OSError("EMFILE injected")
+
+            def run_command() -> None:
+                try:
+                    runner.run(
+                        [sys.executable, "-c", parent_code],
+                        output_callback=lambda _stream, _text: None,
+                    )
+                except BaseException as exc:
+                    outcome.append(exc)
+
+            thread = threading.Thread(target=run_command)
+            try:
+                with patch("src.infra.command_runner.subprocess.Popen", new=capture_process):
+                    with patch("src.infra.command_runner.selectors.DefaultSelector", new=selector_factory):
+                        thread.start()
+                        deadline = time.monotonic() + 5
+                        while not pid_file.exists() and time.monotonic() < deadline:
+                            time.sleep(0.01)
+                        self.assertTrue(pid_file.exists(), "detached descendant did not start")
+                        child_pid = int(pid_file.read_text(encoding="ascii"))
+                        self.assertTrue(stalled.wait(3), "pipe EOF stall must notify the caller")
+                        self.assertTrue(thread.is_alive(), "streaming failure must remain fail-closed")
+                        self.assertTrue(self._pid_is_running(child_pid), "detached pipe holder must remain alive")
+                        self.assertIn("not starting cleanup", stall_messages[0])
+                        self.assertEqual(outcome, [], "the injected failure must not return before EOF")
+                        release_file.touch(exist_ok=True)
+                        thread.join(3)
+            finally:
+                release_file.touch(exist_ok=True)
+                if pid_file.exists():
+                    child_pid = int(pid_file.read_text(encoding="ascii"))
+                    deadline = time.monotonic() + 1
+                    while self._pid_is_running(child_pid) and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    if self._pid_is_running(child_pid):
+                        try:
+                            os.kill(child_pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                for process in managed_processes:
+                    if thread.is_alive() and runner._process_group_alive(process.pid):
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                if thread.is_alive():
+                    thread.join(3)
+
+        self.assertFalse(thread.is_alive(), "test cleanup must not leave a runner behind")
+        self.assertEqual(len(outcome), 1)
+        self.assertIsInstance(outcome[0], OSError)
+        self.assertIn("EMFILE injected", str(outcome[0]))
+
+    def test_persistent_stream_read_errors_notify_and_remain_fail_closed_without_spinning(self) -> None:
+        stalled = threading.Event()
+        stall_messages: list[str] = []
+        runner = CommandRunner(
+            DummyLogger(),
+            cancel_stalled_callback=lambda reason: (stall_messages.append(reason), stalled.set()),
+        )
+        runner.TERMINATION_GRACE_SECONDS = 0.1
+        runner.PIPE_EOF_STALL_SECONDS = 0.15
+        outcome: list[BaseException] = []
+        pipe_fds: set[int] = set()
+        read_attempts = 0
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pid_file = Path(tmpdir) / "detached-child.pid"
+            release_file = Path(tmpdir) / "release-child"
+            child_code = (
+                "import os, time\n"
+                f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
+                "os.write(1, b'detached output\\n')\n"
+                f"release = {str(release_file)!r}\n"
+                "deadline = time.monotonic() + 20\n"
+                "while not os.path.exists(release) and time.monotonic() < deadline:\n"
+                "    time.sleep(.01)\n"
+            )
+            parent_code = (
+                "import os, subprocess, sys, time\n"
+                f"subprocess.Popen([sys.executable, '-c', {child_code!r}], start_new_session=True)\n"
+                "deadline = time.monotonic() + 5\n"
+                f"while not os.path.exists({str(pid_file)!r}) and time.monotonic() < deadline:\n"
+                "    time.sleep(.01)\n"
+            )
+            original_popen = subprocess.Popen
+
+            def capture_process(*args, **kwargs):
+                process = original_popen(*args, **kwargs)
+                if process.stdout is not None:
+                    pipe_fds.add(process.stdout.fileno())
+                if process.stderr is not None:
+                    pipe_fds.add(process.stderr.fileno())
+                return process
+
+            real_os_read = os.read
+
+            def failing_read(fd: int, size: int) -> bytes:
+                nonlocal read_attempts
+                if fd in pipe_fds:
+                    read_attempts += 1
+                    raise OSError(5, "EIO persistent injected")
+                return real_os_read(fd, size)
+
+            def run_command() -> None:
+                try:
+                    runner.run(
+                        [sys.executable, "-c", parent_code],
+                        output_callback=lambda _stream, _text: None,
+                    )
+                except BaseException as exc:
+                    outcome.append(exc)
+
+            thread = threading.Thread(target=run_command)
+            try:
+                with patch("src.infra.command_runner.subprocess.Popen", new=capture_process):
+                    with patch("src.infra.command_runner.os.read", side_effect=failing_read):
+                        thread.start()
+                        deadline = time.monotonic() + 5
+                        while not pid_file.exists() and time.monotonic() < deadline:
+                            time.sleep(0.01)
+                        self.assertTrue(pid_file.exists(), "detached descendant did not start")
+                        child_pid = int(pid_file.read_text(encoding="ascii"))
+                        self.assertTrue(stalled.wait(3), "persistent read errors must notify the caller")
+                        self.assertTrue(thread.is_alive(), "unverifiable EOF must block cleanup")
+                        self.assertTrue(self._pid_is_running(child_pid), "detached pipe holder must remain alive")
+                        self.assertLess(read_attempts, 20, "read failures must be retried with bounded backoff")
+                        self.assertIn("not starting cleanup", stall_messages[0])
+                        self.assertEqual(outcome, [], "persistent read errors must not return to workflow cleanup")
+            finally:
+                release_file.touch(exist_ok=True)
+                if pid_file.exists():
+                    child_pid = int(pid_file.read_text(encoding="ascii"))
+                    deadline = time.monotonic() + 1
+                    while self._pid_is_running(child_pid) and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    if self._pid_is_running(child_pid):
+                        try:
+                            os.kill(child_pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                if thread.is_alive():
+                    thread.join(3)
+
+        self.assertFalse(thread.is_alive(), "test cleanup must not leave a runner behind")
+        self.assertEqual(len(outcome), 1)
+        self.assertIsInstance(outcome[0], OSError)
+        self.assertIn("EIO persistent injected", str(outcome[0]))
+
+    def test_streaming_mode_stops_descendant_holding_pipes_after_leader_exit(self) -> None:
+        runner = CommandRunner(DummyLogger())
+        runner.TERMINATION_GRACE_SECONDS = 0.25
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pid_file = Path(tmpdir) / "child.pid"
+            child_code = (
+                "import os, signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                f"open({str(pid_file)!r}, 'w').write(str(os.getpid())); time.sleep(30)"
+            )
+            parent_code = f"import subprocess, sys; subprocess.Popen([sys.executable, '-c', {child_code!r}])"
+            outcome: list[BaseException] = []
+
+            def run_command() -> None:
+                try:
+                    runner.run(
+                        [sys.executable, "-c", parent_code],
+                        output_callback=lambda _stream, _text: None,
+                    )
+                except BaseException as exc:
+                    outcome.append(exc)
+
+            thread = threading.Thread(target=run_command)
+            thread.start()
+            deadline = time.monotonic() + 5
+            while not pid_file.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(pid_file.exists(), "descendant did not start")
+            child_pid = int(pid_file.read_text(encoding="ascii"))
+            pgid = os.getpgid(child_pid)
+            thread.join(4)
+            completed_before_fallback = not thread.is_alive()
+            if thread.is_alive():
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                thread.join(3)
+
+        self.assertTrue(completed_before_fallback, "runner must stop inherited-pipe descendants")
+        self.assertFalse(thread.is_alive(), "test cleanup must not leave a runner behind")
+        self.assertEqual(outcome, [])
+        self.assertFalse(self._pid_is_running(child_pid))
+
+    def test_streaming_cancellation_stops_the_command_group_before_return(self) -> None:
+        cancel_event = threading.Event()
+        runner = CommandRunner(DummyLogger(), cancel_event=cancel_event)
+        runner.TERMINATION_GRACE_SECONDS = 0.25
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pid_file = Path(tmpdir) / "child.pid"
+            child_code = (
+                "import os, signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                f"open({str(pid_file)!r}, 'w').write(str(os.getpid())); time.sleep(30)"
+            )
+            parent_code = (
+                "import subprocess, sys, time; "
+                f"subprocess.Popen([sys.executable, '-c', {child_code!r}]); time.sleep(30)"
+            )
+            outcome: list[BaseException] = []
+
+            def run_command() -> None:
+                try:
+                    runner.run(
+                        [sys.executable, "-c", parent_code],
+                        output_callback=lambda _stream, _text: None,
+                    )
+                except BaseException as exc:
+                    outcome.append(exc)
+
+            thread = threading.Thread(target=run_command)
+            thread.start()
+            deadline = time.monotonic() + 5
+            while not pid_file.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(pid_file.exists(), "descendant did not start")
+            child_pid = int(pid_file.read_text(encoding="ascii"))
+            pgid = os.getpgid(child_pid)
+            cancel_event.set()
+            thread.join(4)
+            completed_before_fallback = not thread.is_alive()
+            if thread.is_alive():
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                thread.join(3)
+
+        self.assertTrue(completed_before_fallback, "cancel must wait for group termination")
+        self.assertFalse(thread.is_alive(), "test cleanup must not leave a runner behind")
+        self.assertEqual(len(outcome), 1)
+        self.assertIsInstance(outcome[0], AppError)
+        self.assertEqual(outcome[0].code, "E123")  # type: ignore[union-attr]
+        self.assertFalse(self._pid_is_running(child_pid))
 
     def test_cancellation_terminates_and_reaps_external_command(self) -> None:
         cancel_event = threading.Event()
@@ -289,6 +701,178 @@ class CommandRunnerTests(unittest.TestCase):
             child_alive_when_runner_returned,
             "descendant holding inherited pipes must be stopped before normal completion",
         )
+
+    def test_normal_mode_reports_and_blocks_on_pipe_held_by_detached_descendant(self) -> None:
+        self._assert_detached_pipe_holder_blocks_cleanup(streaming=False)
+
+    def test_streaming_mode_reports_and_blocks_on_pipe_held_by_detached_descendant(self) -> None:
+        self._assert_detached_pipe_holder_blocks_cleanup(streaming=True)
+
+    def test_termination_waits_for_detached_pipe_holder_in_normal_and_streaming_modes(self) -> None:
+        for drain_output in (True, False):
+            with self.subTest(drain_output=drain_output), tempfile.TemporaryDirectory() as tmpdir:
+                stalled = threading.Event()
+                stall_messages: list[str] = []
+                runner = CommandRunner(
+                    DummyLogger(),
+                    cancel_stalled_callback=lambda reason: (stall_messages.append(reason), stalled.set()),
+                )
+                runner.PIPE_EOF_STALL_SECONDS = 0.15
+                runner.TERMINATION_GRACE_SECONDS = 0.1
+                pid_file = Path(tmpdir) / "detached-child.pid"
+                release_file = Path(tmpdir) / "release-child"
+                child_code = (
+                    "import os, time\n"
+                    f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
+                    f"release = {str(release_file)!r}\n"
+                    "deadline = time.monotonic() + 20\n"
+                    "while not os.path.exists(release) and time.monotonic() < deadline:\n"
+                    "    time.sleep(.01)\n"
+                )
+                parent_code = (
+                    "import os, subprocess, sys, time\n"
+                    f"subprocess.Popen([sys.executable, '-c', {child_code!r}], start_new_session=True)\n"
+                    "deadline = time.monotonic() + 5\n"
+                    f"while not os.path.exists({str(pid_file)!r}) and time.monotonic() < deadline:\n"
+                    "    time.sleep(.01)\n"
+                )
+                process = subprocess.Popen(
+                    [sys.executable, "-c", parent_code],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    start_new_session=True,
+                )
+                outcome: list[object] = []
+
+                def terminate() -> None:
+                    try:
+                        outcome.append(runner._terminate_and_reap(process, drain_output=drain_output))
+                    except BaseException as exc:
+                        outcome.append(exc)
+
+                thread = threading.Thread(target=terminate)
+                try:
+                    deadline = time.monotonic() + 5
+                    while not pid_file.exists() and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    self.assertTrue(pid_file.exists(), "detached descendant did not start")
+                    child_pid = int(pid_file.read_text(encoding="ascii"))
+                    thread.start()
+                    self.assertTrue(stalled.wait(3), "pipe EOF stall must notify the caller")
+                    self.assertTrue(thread.is_alive(), "cleanup must remain blocked while EOF is unconfirmed")
+                    self.assertTrue(self._pid_is_running(child_pid), "detached pipe holder must still be alive")
+                    self.assertIn("not starting cleanup", stall_messages[0])
+                finally:
+                    release_file.touch(exist_ok=True)
+                    if thread.is_alive():
+                        thread.join(3)
+                    if thread.is_alive():
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        thread.join(3)
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait(timeout=2)
+
+                self.assertFalse(thread.is_alive(), "releasing the pipe holder must allow cleanup to continue")
+                self.assertEqual(len(outcome), 1)
+                self.assertEqual(outcome[0], ("", ""))
+
+    def _assert_detached_pipe_holder_blocks_cleanup(self, *, streaming: bool) -> None:
+        cancel_event = threading.Event()
+        stalled = threading.Event()
+        stall_messages: list[str] = []
+        runner = CommandRunner(
+            DummyLogger(),
+            cancel_event=cancel_event,
+            cancel_stalled_callback=lambda reason: (stall_messages.append(reason), stalled.set()),
+        )
+        runner.TERMINATION_GRACE_SECONDS = 0.15
+        runner.PIPE_EOF_STALL_SECONDS = 0.2
+        outcome: list[object] = []
+        managed_processes: list[subprocess.Popen[bytes] | subprocess.Popen[str]] = []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pid_file = Path(tmpdir) / "detached-child.pid"
+            release_file = Path(tmpdir) / "release-child"
+            child_code = (
+                "import os, time\n"
+                f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
+                f"release = {str(release_file)!r}\n"
+                "deadline = time.monotonic() + 20\n"
+                "while not os.path.exists(release) and time.monotonic() < deadline:\n"
+                "    time.sleep(.01)\n"
+            )
+            parent_code = (
+                "import os, subprocess, sys, time\n"
+                f"subprocess.Popen([sys.executable, '-c', {child_code!r}], start_new_session=True)\n"
+                "deadline = time.monotonic() + 5\n"
+                f"while not os.path.exists({str(pid_file)!r}) and time.monotonic() < deadline:\n"
+                "    time.sleep(.01)\n"
+            )
+            command = [sys.executable, "-c", parent_code]
+            original_popen = subprocess.Popen
+
+            def capture_process(*args, **kwargs):
+                process = original_popen(*args, **kwargs)
+                managed_processes.append(process)
+                return process
+
+            def run_command() -> None:
+                try:
+                    kwargs = {"output_callback": lambda _stream, _text: None} if streaming else {}
+                    outcome.append(runner.run(command, **kwargs))
+                except BaseException as exc:
+                    outcome.append(exc)
+
+            thread = threading.Thread(target=run_command)
+            notified_while_blocked = False
+            detached_child_alive_when_notified = False
+            try:
+                with patch("src.infra.command_runner.subprocess.Popen", new=capture_process):
+                    thread.start()
+                    deadline = time.monotonic() + 5
+                    while not pid_file.exists() and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    self.assertTrue(pid_file.exists(), "detached descendant did not start")
+                    child_pid = int(pid_file.read_text(encoding="ascii"))
+                    cancel_event.set()
+                    self.assertTrue(stalled.wait(3), "pipe EOF stall must notify the caller")
+                    notified_while_blocked = thread.is_alive()
+                    detached_child_alive_when_notified = self._pid_is_running(child_pid)
+            finally:
+                # The detached process is deliberately outside the runner's
+                # process group; release it explicitly so the fail-closed test
+                # can finish without leaving a process behind.
+                release_file.touch(exist_ok=True)
+                if pid_file.exists():
+                    child_pid = int(pid_file.read_text(encoding="ascii"))
+                    deadline = time.monotonic() + 1
+                    while self._pid_is_running(child_pid) and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    if self._pid_is_running(child_pid):
+                        try:
+                            os.kill(child_pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                if thread.is_alive() and managed_processes:
+                    try:
+                        os.killpg(managed_processes[0].pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                thread.join(3)
+
+        self.assertTrue(notified_while_blocked, "runner must not return while an unmanaged writer holds pipes")
+        self.assertTrue(detached_child_alive_when_notified, "the pipe-holding detached process must remain live")
+        self.assertTrue(stall_messages)
+        self.assertIn("not starting cleanup", stall_messages[0])
+        self.assertFalse(thread.is_alive(), "test cleanup must release the detached pipe holder")
+        self.assertEqual(len(outcome), 1)
+        self.assertIsInstance(outcome[0], AppError)
+        self.assertEqual(outcome[0].code, "E123")  # type: ignore[union-attr]
 
     @staticmethod
     def _pid_is_running(pid: int) -> bool:

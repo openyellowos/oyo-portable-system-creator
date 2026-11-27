@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import re
+import codecs
+import selectors
 import signal
 import subprocess
 import threading
@@ -25,6 +27,7 @@ class CommandResult:
 
 class CommandRunner:
     TERMINATION_GRACE_SECONDS = 3.0
+    PIPE_EOF_STALL_SECONDS = 5.0
 
     def __init__(
         self,
@@ -57,10 +60,15 @@ class CommandRunner:
         mask_values: list[str] | None = None,
         cwd: str | None = None,
         input_text: str | None = None,
+        output_callback: Callable[[str, str], None] | None = None,
     ) -> CommandResult:
         self.check_cancelled()
         masked = self._masked(command, mask_values or [])
         self.logger.debug(f"$ {' '.join(masked)}")
+        if output_callback is not None:
+            if input_text is not None:
+                raise ValueError("streaming output cannot be combined with input_text")
+            return self._run_streaming(command, check, masked, cwd, output_callback)
         process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
@@ -126,7 +134,199 @@ class CommandRunner:
             raise AppError.translated("E999", "error.command_failed", command=" ".join(masked))
         return result
 
-    def _terminate_and_reap(self, process: subprocess.Popen[str]) -> tuple[str, str]:
+    def _run_streaming(
+        self,
+        command: list[str],
+        check: bool,
+        masked: list[str],
+        cwd: str | None,
+        output_callback: Callable[[str, str], None],
+    ) -> CommandResult:
+        """Drain both pipes incrementally while retaining process-group ownership."""
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
+            cwd=cwd,
+            start_new_session=True,
+        )
+        selector: selectors.BaseSelector | None = None
+        output: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
+        streams = {}
+        decoders = {}
+        terminated_at: float | None = None
+        leader_exited_at: float | None = None
+        kill_sent = False
+        kill_started_at = 0.0
+        last_kill_at = 0.0
+        stalled_notified = False
+        cancelled = False
+        interrupted = False
+        callback_error: Exception | None = None
+
+        def signal_group(sig: int, label: str) -> None:
+            try:
+                os.killpg(process.pid, sig)
+            except ProcessLookupError:
+                pass
+            except OSError as exc:
+                notify_stalled(
+                    f"Could not send {label} to command group {process.pid}: {exc}; cleanup remains blocked."
+                )
+
+        def notify_stalled(reason: str) -> None:
+            nonlocal stalled_notified
+            if stalled_notified:
+                return
+            stalled_notified = True
+            self._notify_stream_stalled(reason)
+
+        def request_termination() -> None:
+            nonlocal terminated_at
+            if terminated_at is None:
+                signal_group(signal.SIGTERM, "SIGTERM")
+                terminated_at = time.monotonic()
+
+        try:
+            # Selector creation and registration happen after Popen has started
+            # the command. Keep them under the same ownership guard as reads so
+            # any setup failure stops/reaps the complete command group.
+            assert process.stdout is not None and process.stderr is not None
+            streams = {"stdout": process.stdout, "stderr": process.stderr}
+            decoders = {
+                name: codecs.getincrementaldecoder("utf-8")(errors="replace")
+                for name in streams
+            }
+            selector = selectors.DefaultSelector()
+            for name, stream in streams.items():
+                os.set_blocking(stream.fileno(), False)
+                selector.register(stream, selectors.EVENT_READ, name)
+
+            while True:
+                if not self._ignore_cancel and self.cancel_event is not None and self.cancel_event.is_set():
+                    cancelled = True
+                    request_termination()
+
+                # Once the command leader exits, stop any remaining descendants
+                # before the workflow can proceed, even when they hold the pipes.
+                now = time.monotonic()
+                leader_exited = process.poll() is not None
+                group_alive = self._process_group_alive(process.pid) if leader_exited else False
+                if leader_exited:
+                    if leader_exited_at is None:
+                        leader_exited_at = now
+                    if group_alive:
+                        request_termination()
+                    elif selector.get_map() and now - leader_exited_at >= self.PIPE_EOF_STALL_SECONDS:
+                        notify_stalled(
+                            f"Command group {process.pid} has exited but output pipes are still open; keeping the operation lock and suspend inhibitor, and not starting cleanup."
+                        )
+                if terminated_at is not None:
+                    if not kill_sent and now - terminated_at >= self.TERMINATION_GRACE_SECONDS:
+                        signal_group(signal.SIGKILL, "SIGKILL")
+                        kill_sent = True
+                        kill_started_at = now
+                        last_kill_at = now
+                    elif kill_sent and self._process_group_alive(process.pid) and now - last_kill_at >= 0.5:
+                        signal_group(signal.SIGKILL, "SIGKILL")
+                        last_kill_at = now
+                    if kill_sent and not stalled_notified and now - kill_started_at >= 5:
+                        notify_stalled(
+                            f"Command group {process.pid} is still running after SIGKILL; keeping the operation lock and suspend inhibitor, and not starting cleanup."
+                        )
+
+                events = selector.select(timeout=0.2)
+                for key, _mask in events:
+                    name = key.data
+                    stream = key.fileobj
+                    try:
+                        chunk = os.read(stream.fileno(), 65536)
+                    except BlockingIOError:
+                        continue
+                    if not chunk:
+                        selector.unregister(stream)
+                        tail = decoders[name].decode(b"", final=True)
+                        if tail:
+                            try:
+                                output_callback(name, tail)
+                            except Exception as exc:
+                                callback_error = exc
+                                request_termination()
+                        continue
+                    output[name].extend(chunk)
+                    decoded = decoders[name].decode(chunk)
+                    if decoded:
+                        try:
+                            output_callback(name, decoded)
+                        except Exception as exc:
+                            callback_error = exc
+                            request_termination()
+
+                if (
+                    process.poll() is not None
+                    and not self._process_group_alive(process.pid)
+                    and not selector.get_map()
+                ):
+                    break
+        except KeyboardInterrupt:
+            interrupted = True
+            self._terminate_and_reap(process)
+        except BaseException:
+            # Unexpected selector/read failures must not hand control back to
+            # the workflow while rsync or one of its descendants can still
+            # write to the target. This intentionally waits if the process
+            # group cannot be confirmed stopped.
+            self._terminate_and_reap(process, drain_output=False)
+            raise
+
+        finally:
+            if selector is not None:
+                selector.close()
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+
+        if not self._ignore_cancel and self.cancel_event is not None and self.cancel_event.is_set():
+            cancelled = True
+
+        result = CommandResult(
+            command=command,
+            returncode=process.returncode if process.returncode is not None else process.wait(),
+            stdout=bytes(output["stdout"]).decode("utf-8", errors="replace"),
+            stderr=bytes(output["stderr"]).decode("utf-8", errors="replace"),
+        )
+        if interrupted:
+            raise KeyboardInterrupt
+        if callback_error is not None:
+            raise callback_error
+        if cancelled:
+            self.check_cancelled()
+        sanitized_stdout = self._sanitize_output_for_log(result.stdout)
+        sanitized_stderr = self._sanitize_output_for_log(result.stderr)
+        if sanitized_stdout:
+            self.logger.debug(sanitized_stdout)
+        if sanitized_stderr:
+            self.logger.debug(sanitized_stderr)
+        if check and result.returncode != 0:
+            raise AppError.translated("E999", "error.command_failed", command=" ".join(masked))
+        return result
+
+    def _notify_stream_stalled(self, reason: str) -> None:
+        self.logger.error(reason)
+        if self.cancel_stalled_callback is not None:
+            try:
+                self.cancel_stalled_callback(reason)
+            except Exception:
+                pass
+
+    def _terminate_and_reap(
+        self,
+        process: subprocess.Popen[str],
+        *,
+        drain_output: bool = True,
+    ) -> tuple[str, str]:
         """Stop the full command session and reap it before workflow cleanup starts."""
         stalled_notified = False
 
@@ -157,15 +357,39 @@ class CommandRunner:
         kill_sent = False
         kill_started_at = 0.0
         last_kill_at = 0.0
+        pipe_wait_started_at: float | None = None
         while True:
-            try:
-                output = process.communicate(timeout=0.2)
-            except subprocess.TimeoutExpired:
-                output = None
-
+            # Never depend on draining pipes in order to terminate the process
+            # group. In streaming mode the read side itself may be failing; a
+            # second read through communicate() would otherwise bypass SIGKILL
+            # escalation and release ownership while a writer is still alive.
+            process.poll()  # reap the leader when it has exited; does not read pipes
             group_alive = self._process_group_alive(process.pid)
-            if output is not None and not group_alive:
-                return output
+            if not group_alive and process.poll() is not None:
+                process.wait()
+                # Even when streaming's selector/read path failed, we must
+                # still prove that every writer has closed the pipes before
+                # returning to workflow cleanup. communicate() is bounded so
+                # an escaped descendant cannot cause an unobservable hang;
+                # failures to read are treated as an inability to prove EOF,
+                # not as permission to proceed.
+                if pipe_wait_started_at is None:
+                    pipe_wait_started_at = time.monotonic()
+                try:
+                    completed = process.communicate(timeout=0.2)
+                except (subprocess.TimeoutExpired, OSError) as exc:
+                    now = time.monotonic()
+                    if now - pipe_wait_started_at >= self.PIPE_EOF_STALL_SECONDS:
+                        notify_stalled(
+                            f"Command group {process.pid} has stopped but output pipes are still open or EOF could not be verified outside the command group; keeping the operation lock and suspend inhibitor, and not starting cleanup."
+                        )
+                    if isinstance(exc, OSError):
+                        # communicate(timeout=...) can fail immediately when
+                        # reads keep erroring. Back off so an unverifiable EOF
+                        # remains fail-closed without spinning a CPU core.
+                        time.sleep(0.1)
+                    continue
+                return completed if drain_output else ("", "")
 
             elapsed = time.monotonic() - started_at
             if not kill_sent and elapsed >= self.TERMINATION_GRACE_SECONDS:
@@ -183,8 +407,7 @@ class CommandRunner:
                 notify_stalled(
                     f"Command group {process.pid} is still running after SIGKILL; keeping the operation lock and suspend inhibitor, and not starting cleanup."
                 )
-            if output is not None:
-                time.sleep(0.1)
+            time.sleep(0.1)
 
     @staticmethod
     def _process_group_alive(process_group_id: int) -> bool:

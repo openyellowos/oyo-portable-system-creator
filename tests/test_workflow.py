@@ -150,6 +150,7 @@ class DummyPartitionService:
 class DummyCopyService:
     def __init__(self) -> None:
         self.rsync_calls: list[tuple[str, Path, str]] = []
+        self.progress_callbacks: list[object] = []
 
     def resolve_source(self, mode: str, source_device: str | None = None) -> str:
         return "/"
@@ -157,8 +158,9 @@ class DummyCopyService:
     def estimate_copy_bytes(self, source: str, mode: str) -> int:
         return 1024
 
-    def rsync_copy(self, source: str, target_root: Path, mode: str) -> None:
+    def rsync_copy(self, source: str, target_root: Path, mode: str, progress_callback=None) -> None:
         self.rsync_calls.append((source, target_root, mode))
+        self.progress_callbacks.append(progress_callback)
 
     def write_fstab(self, target_root: Path, root_uuid: str, boot_uuid: str, efi_uuid: str, **_: object) -> None:
         return None
@@ -213,6 +215,65 @@ class WorkflowTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.tempdir.cleanup()
+
+    def test_copy_progress_maps_each_rsync_pass_and_never_moves_backwards(self) -> None:
+        state = ExecutionState(mode="create", target_device="/dev/sdz")
+        state.metadata["copy_bytes"] = 100
+        updates: list[tuple[int, str]] = []
+        state.add_progress_listener(lambda percent, step: updates.append((percent, step)))
+
+        first = self.workflow._copy_progress_callback(state, 1)
+        second = self.workflow._copy_progress_callback(state, 2)
+        assert first is not None
+        self.assertIsNone(second)
+        for transferred_bytes in (0, 50, 94, 95, 100, 25):
+            first(transferred_bytes)
+
+        self.assertEqual([percent for percent, _ in updates], [45, 49, 53, 53])
+        self.assertIn("(1/2)", updates[1][1])
+        self.assertIn("50%", updates[1][1])
+        self.assertIn("データ転送は終盤です。処理を継続中…", updates[-1][1])
+        self.assertNotIn("100%", " ".join(step for _, step in updates))
+        self.assertTrue(all(a <= b for a, b in zip((v[0] for v in updates), (v[0] for v in updates[1:]))))
+
+    def test_copy_progress_falls_back_when_estimate_is_missing_or_zero(self) -> None:
+        state = ExecutionState(mode="create", target_device="/dev/sdz")
+        state.add_progress_listener(lambda _percent, _step: None)
+
+        self.assertIsNone(self.workflow._copy_progress_callback(state, 1))
+        state.metadata["copy_bytes"] = 0
+        self.assertIsNone(self.workflow._copy_progress_callback(state, 1))
+
+    def test_copy_progress_shows_processing_when_percent_stays_unchanged(self) -> None:
+        state = ExecutionState(mode="create", target_device="/dev/sdz")
+        state.metadata["copy_bytes"] = 1000
+        updates: list[tuple[int, str]] = []
+        state.add_progress_listener(lambda percent, step: updates.append((percent, step)))
+        callback = self.workflow._copy_progress_callback(state, 1)
+        assert callback is not None
+
+        callback(500)
+        for _ in range(4):
+            callback(500)
+        self.assertIn("コピー処理中", updates[-1][1])
+        callback(510)
+        self.assertIn("51%", updates[-1][1])
+        self.assertTrue(all(a <= b for a, b in zip((p for p, _ in updates), (p for p, _ in updates[1:]))))
+
+    def test_copy_pass_two_uses_verification_status_without_byte_percentage(self) -> None:
+        state = ExecutionState(mode="create", target_device="/dev/sdz")
+        state.metadata["copy_bytes"] = 1024
+        updates: list[tuple[int, str]] = []
+        state.add_progress_listener(lambda percent, step: updates.append((percent, step)))
+
+        self.workflow._rsync_copy_with_progress(state, "/", Path("/target"), "create", 1)
+        self.workflow._rsync_copy_with_progress(state, "/", Path("/target"), "create", 2)
+
+        self.assertIsNotNone(self.copy_service.progress_callbacks[0])
+        self.assertIsNone(self.copy_service.progress_callbacks[1])
+        self.assertEqual([percent for percent, _ in updates], [54, 55, 59])
+        self.assertIn("ファイル確認中", updates[1][1])
+        self.assertEqual(updates[2][1], self.workflow.translate("workflow.copy.second"))
 
     def test_precheck_runs_before_target_preparation(self) -> None:
         events: list[str] = []
