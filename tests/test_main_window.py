@@ -6,7 +6,7 @@ from unittest.mock import patch
 from PyQt6.QtWidgets import QApplication, QProgressBar
 from PyQt6.QtGui import QCloseEvent
 
-from src.gui.main_window import CreateWorker, MainWindow
+from src.gui.main_window import CreateWorker, DiagnosticWorker, MainWindow
 from src.gui.i18n import build_translator
 
 
@@ -34,6 +34,28 @@ class MainWindowDeviceSelectionTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.window.close()
+
+    def test_diagnostic_worker_runs_precheck_and_returns_capacity_estimate(self) -> None:
+        class Controller:
+            def precheck(self, state):
+                state.metadata["copy_bytes"] = 4096
+                state.used_bytes = 4096
+                state.required_bytes = 6144
+                return state
+
+        worker = DiagnosticWorker("/dev/fake", "ja")
+        completed = []
+        failures = []
+        worker.finished.connect(completed.append)
+        worker.failed.connect(failures.append)
+
+        with patch("src.gui.main_window.build_services", return_value=(Controller(), None)):
+            worker.run()
+
+        self.assertEqual(failures, [])
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0].metadata["copy_bytes"], 4096)
+        self.assertEqual(completed[0].required_bytes, 6144)
 
     def test_on_devices_loaded_selects_first_device(self) -> None:
         devices = [{"name": "sdb", "path": "/dev/sdb", "size": 8 * 1024**3, "vendor": "USB", "model": "Memory"}]

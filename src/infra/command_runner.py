@@ -10,7 +10,7 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 
 from src.core.errors import AppError
@@ -61,14 +61,19 @@ class CommandRunner:
         cwd: str | None = None,
         input_text: str | None = None,
         output_callback: Callable[[str, str], None] | None = None,
+        env_overrides: Mapping[str, str] | None = None,
     ) -> CommandResult:
         self.check_cancelled()
         masked = self._masked(command, mask_values or [])
         self.logger.debug(f"$ {' '.join(masked)}")
+        process_env = None
+        if env_overrides is not None:
+            process_env = os.environ.copy()
+            process_env.update(env_overrides)
         if output_callback is not None:
             if input_text is not None:
                 raise ValueError("streaming output cannot be combined with input_text")
-            return self._run_streaming(command, check, masked, cwd, output_callback)
+            return self._run_streaming(command, check, masked, cwd, output_callback, process_env)
         process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
@@ -77,6 +82,7 @@ class CommandRunner:
             text=True,
             cwd=cwd,
             start_new_session=True,
+            env=process_env,
         )
         first_communicate = True
         try:
@@ -141,6 +147,7 @@ class CommandRunner:
         masked: list[str],
         cwd: str | None,
         output_callback: Callable[[str, str], None],
+        process_env: dict[str, str] | None,
     ) -> CommandResult:
         """Drain both pipes incrementally while retaining process-group ownership."""
         process = subprocess.Popen(
@@ -150,6 +157,7 @@ class CommandRunner:
             text=False,
             cwd=cwd,
             start_new_session=True,
+            env=process_env,
         )
         selector: selectors.BaseSelector | None = None
         output: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}

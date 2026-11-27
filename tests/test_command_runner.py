@@ -28,6 +28,37 @@ class DummyLogger:
 
 
 class CommandRunnerTests(unittest.TestCase):
+    def test_env_overrides_merge_with_parent_environment_for_both_run_paths(self) -> None:
+        runner = CommandRunner(DummyLogger())
+        script = (
+            "import locale, os; locale.setlocale(locale.LC_ALL, ''); "
+            "print('|'.join((os.getenv('LC_ALL', ''), os.getenv('LANG', ''), "
+            "os.getenv('LC_NUMERIC', ''), os.getenv('LC_MESSAGES', ''), "
+            "locale.setlocale(locale.LC_ALL, ''))))"
+        )
+        parent_env = {
+            "LANG": "de_DE.UTF-8",
+            "LC_NUMERIC": "fr_FR.UTF-8",
+            "LC_MESSAGES": "ja_JP.UTF-8",
+            "PATH": os.environ.get("PATH", ""),
+        }
+        with patch.dict(os.environ, parent_env, clear=True):
+            result = runner.run(
+                [sys.executable, "-c", script],
+                env_overrides={"LC_ALL": "C"},
+            )
+            streamed: list[tuple[str, str]] = []
+            streamed_result = runner.run(
+                [sys.executable, "-c", script],
+                env_overrides={"LC_ALL": "C"},
+                output_callback=lambda stream, text: streamed.append((stream, text)),
+            )
+
+        expected = "C|de_DE.UTF-8|fr_FR.UTF-8|ja_JP.UTF-8|C"
+        self.assertEqual(result.stdout.strip(), expected)
+        self.assertEqual(streamed_result.returncode, 0)
+        self.assertIn(("stdout", expected + "\n"), streamed)
+
     def test_sanitize_output_for_log_removes_control_characters(self) -> None:
         text = "Discarding device blocks:\r0/31126784\x08\x08\x08done\n\x00next line"
 

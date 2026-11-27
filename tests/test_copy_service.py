@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from src.core.errors import AppError
+from src.infra.command_runner import CommandRunner
 from src.services.copy_service import CopyService, RsyncProgressParser
 
 
@@ -63,6 +65,103 @@ class CopyServiceTests(unittest.TestCase):
         command = self.service._build_rsync_command("/", "/target", mode="backup")
 
         self.assertNotIn("--filter", command)
+
+    def test_estimate_uses_c_locale_for_create_and_backup(self) -> None:
+        class Runner:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def run(self, command, *, check, env_overrides):
+                self.calls.append((command, check, env_overrides))
+                return type("Result", (), {
+                    "returncode": 0,
+                    "stdout": "total transferred file size: 1,234 bytes\n",
+                    "stderr": "",
+                })()
+
+        runner = Runner()
+        service = CopyService(runner)  # type: ignore[arg-type]
+        for mode in ("create", "backup"):
+            self.assertEqual(service.estimate_copy_bytes("/source", mode), 1234)
+        self.assertEqual(len(runner.calls), 2)
+        for command, check, env_overrides in runner.calls:
+            self.assertIn("--dry-run", command)
+            self.assertIn("--stats", command)
+            self.assertFalse(check)
+            self.assertEqual(env_overrides, {"LC_ALL": "C"})
+
+    def test_stats_parser_accepts_exact_integer_and_well_formed_comma_groups(self) -> None:
+        samples = {
+            "total transferred file size: 5864375238 bytes\n": 5864375238,
+            "total transferred file size: 5,864,375,238 bytes\n": 5864375238,
+            "total transferred file size: 0 bytes\n": 0,
+        }
+        for stats, expected in samples.items():
+            with self.subTest(stats=stats):
+                self.assertEqual(self.service._parse_total_transferred_file_size(stats, ""), expected)
+
+    def test_stats_parser_reads_stats_from_stdout_or_stderr(self) -> None:
+        stats = "total transferred file size: 1,234 bytes\n"
+        self.assertEqual(self.service._parse_total_transferred_file_size(stats, ""), 1234)
+        self.assertEqual(self.service._parse_total_transferred_file_size("", stats), 1234)
+        self.assertEqual(
+            self.service._parse_total_transferred_file_size("rsync header\n", stats),
+            1234,
+        )
+
+    def test_stats_parser_fails_closed_for_missing_or_malformed_values(self) -> None:
+        malformed = (
+            ("", ""),
+            ("some other rsync output\n", ""),
+            ("total transferred file size: 12,34 bytes\n", ""),
+            ("total transferred file size: 1.234 bytes\n", ""),
+            ("total transferred file size: -1 bytes\n", ""),
+            ("total transferred file size: 1,234x bytes\n", ""),
+            ("total transferred file size: 1 bytes\ntotal transferred file size: 2 bytes\n", ""),
+        )
+        for stdout, stderr in malformed:
+            with self.subTest(stdout=stdout, stderr=stderr):
+                with self.assertRaises(AppError) as raised:
+                    self.service._parse_total_transferred_file_size(stdout, stderr)
+                self.assertEqual(raised.exception.code, "E401")
+
+    def test_estimate_fails_closed_when_rsync_dry_run_fails(self) -> None:
+        class Runner:
+            def run(self, command, *, check, env_overrides):
+                return type("Result", (), {"returncode": 1, "stdout": "", "stderr": "failed"})()
+
+        with self.assertRaises(AppError) as raised:
+            CopyService(Runner()).estimate_copy_bytes("/source", "create")  # type: ignore[arg-type]
+        self.assertEqual(raised.exception.code, "E401")
+
+    def test_real_rsync_estimate_is_stable_under_parent_locale_variations(self) -> None:
+        import shutil
+
+        import os
+
+        if shutil.which("rsync") is None:
+            self.skipTest("rsync is not installed")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "source"
+            source.mkdir()
+            payload = source / "payload.bin"
+            payload.write_bytes(b"x" * (5 * 1024 * 1024 + 123))
+            expected_size = payload.stat().st_size
+            service = CopyService(CommandRunner(type("Logger", (), {"debug": lambda *_: None})()))
+            parent_envs = (
+                {"LC_ALL": "C"},
+                {"LANG": "ja_JP.UTF-8"},
+                {"LANG": "en_US.UTF-8"},
+                {"LANG": "de_DE.UTF-8"},
+                {"LANG": "fr_FR.UTF-8"},
+                {"LANG": "ja_JP.UTF-8", "LC_NUMERIC": "de_DE.UTF-8", "LC_MESSAGES": "fr_FR.UTF-8"},
+            )
+            estimates = []
+            for parent_env in parent_envs:
+                with self.subTest(parent_env=parent_env), patch.dict(os.environ, parent_env, clear=True):
+                    estimates.append(service.estimate_copy_bytes(str(source), "backup"))
+
+        self.assertEqual(estimates, [expected_size] * len(parent_envs))
 
     def test_progress_parser_handles_carriage_returns_and_split_chunks(self) -> None:
         progress: list[int] = []

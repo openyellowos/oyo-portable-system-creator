@@ -167,7 +167,7 @@ class CopyService:
     def estimate_copy_bytes(self, source: str, mode: str) -> int:
         with tempfile.TemporaryDirectory(prefix="oyo-rsync-dryrun-") as tmpdir:
             command = self._build_rsync_command(source, tmpdir, mode=mode, dry_run=True)
-            result = self.runner.run(command, check=False)
+            result = self.runner.run(command, check=False, env_overrides={"LC_ALL": "C"})
         if result.returncode != 0:
             raise AppError.translated("E401", "error.rsync_dry_run_failed")
         return self._parse_total_transferred_file_size(result.stdout, result.stderr)
@@ -247,10 +247,17 @@ class CopyService:
 
     def _parse_total_transferred_file_size(self, stdout: str, stderr: str) -> int:
         output = "\n".join(part for part in (stdout, stderr) if part)
-        match = re.search(r"total transferred file size:\s*([0-9,]+)\s+bytes", output, flags=re.IGNORECASE)
-        if not match:
+        matches = re.findall(
+            r"^\s*total transferred file size:\s*(\S+)\s+bytes\s*$",
+            output,
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+        if len(matches) != 1:
             raise AppError.translated("E401", "error.rsync_stats_parse_failed")
-        return int(match.group(1).replace(",", ""))
+        value = matches[0]
+        if not re.fullmatch(r"[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+", value):
+            raise AppError.translated("E401", "error.rsync_stats_parse_failed")
+        return int(value.replace(",", ""))
 
     def write_fstab(
         self,

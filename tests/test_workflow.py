@@ -288,6 +288,28 @@ class WorkflowTests(unittest.TestCase):
         self.workflow.run_create(ExecutionState(mode="create", target_device="/dev/sdz"))
         self.assertEqual(events, ["precheck", "prepare"])
 
+    def test_estimate_failure_stops_before_partition_preparation(self) -> None:
+        def fail_estimate(_source: str, _mode: str) -> int:
+            raise AppError.translated("E401", "error.rsync_stats_parse_failed")
+
+        self.copy_service.estimate_copy_bytes = fail_estimate  # type: ignore[method-assign]
+        state = ExecutionState(mode="create", target_device="/dev/sdz")
+
+        with self.assertRaises(AppError) as raised:
+            self.workflow.run_create(state)
+
+        self.assertEqual(raised.exception.code, "E401")
+        self.assertEqual(self.partition_service.calls, [])
+        self.assertNotIn("_workflow_workdir", state.metadata)
+
+    def test_precheck_estimate_value_is_the_progress_denominator(self) -> None:
+        state = ExecutionState(mode="backup", target_device="/dev/sdz", source_device="/source")
+
+        self.workflow.precheck(state)
+
+        self.assertEqual(state.metadata["copy_bytes"], 1024)
+        self.assertEqual(state.used_bytes, 1024)
+
     def test_precheck_identity_is_carried_to_destructive_boundary(self) -> None:
         state = ExecutionState(mode="create", target_device="/dev/sdz")
         self.workflow.run_create(state)
