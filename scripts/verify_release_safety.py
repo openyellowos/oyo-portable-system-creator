@@ -188,9 +188,10 @@ def main() -> int:
         else:
             verify_release_state(args.repository, args.tag, args.expected_commit, gh_api_get)
     except SafetyError as exc:
-        print(f"Release safety gate rejected publication: {exc}", file=sys.stderr)
+        print(f"Release safety check failed: {exc}", file=sys.stderr)
         return 1
-    print(f"Remote tag {args.tag} is protected and resolves to {args.expected_commit}")
+    state = "live" if args.tag_only else "protected"
+    print(f"{state.capitalize()} remote tag {args.tag} resolves to {args.expected_commit}")
     return 0
 
 
