@@ -69,6 +69,37 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertNotIn("softprops/action-gh-release", publish)
         self.assertNotIn("|| true", self.source)
 
+    def test_live_tag_and_ruleset_are_checked_before_create_and_publish(self):
+        publish = job_section(self.source, "publish")
+        checks = [
+            "Verify live tag target before tests and build",
+            "Recheck live tag and Ruleset before creating Release",
+            "Recheck live tag and Ruleset immediately before publication",
+        ]
+        self.assertTrue(all(check in self.source for check in checks))
+        create = publish.index("draft=true")
+        before_create = publish.index(checks[1])
+        before_publish = publish.index(checks[2])
+        publish_release = publish.index("draft=false")
+        self.assertLess(before_create, create)
+        self.assertLess(create, before_publish)
+        self.assertLess(before_publish, publish_release)
+        self.assertGreaterEqual(self.source.count("scripts/verify_release_safety.py"), 3)
+        self.assertIn("--tag-only", job_section(self.source, "build_validate"))
+        self.assertEqual(publish.count("RELEASE_RULESET_AUDIT_TOKEN:"), 2)
+        self.assertIn("${{ secrets.RELEASE_RULESET_AUDIT_TOKEN }}", publish)
+
+    def test_ruleset_guard_fails_closed_and_does_not_add_write_permission(self):
+        safety_script = (
+            WORKFLOW.parents[2] / "scripts" / "verify_release_safety.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('REQUIRED_PATTERN = "refs/tags/v*"', safety_script)
+        self.assertIn('"update", "deletion"', safety_script)
+        self.assertIn("no GitHub tag Ruleset is visible", safety_script)
+        self.assertIn("bypass_actors", safety_script)
+        self.assertRegex(self.source, r"(?m)^permissions:\n  contents: read$")
+        self.assertEqual(self.source.count("contents: write"), 1)
+
     def test_assets_use_the_release_upload_url_as_raw_binary(self):
         publish = job_section(self.source, "publish")
         self.assertIn(".upload_url", publish)

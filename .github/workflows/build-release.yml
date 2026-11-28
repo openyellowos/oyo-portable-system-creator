@@ -44,6 +44,17 @@ jobs:
           echo "commit=$tag_commit" >> "$GITHUB_OUTPUT"
           echo "Pinned tag $GITHUB_REF_NAME to $tag_commit"
 
+      - name: Verify live tag target before tests and build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          /usr/bin/python3 scripts/verify_release_safety.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$GITHUB_REF_NAME" \
+            --expected-commit "${{ steps.pin.outputs.commit }}" \
+            --tag-only
+
       - name: Install offline test and Debian build dependencies
         run: |
           sudo apt-get update
@@ -193,6 +204,17 @@ jobs:
               raise SystemExit(f"GitHub Release already exists for version {version}: {existing}")
           PY
 
+      - name: Recheck live tag and Ruleset before creating Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_RULESET_AUDIT_TOKEN: ${{ secrets.RELEASE_RULESET_AUDIT_TOKEN }}
+        run: |
+          set -euo pipefail
+          /usr/bin/python3 scripts/verify_release_safety.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$GITHUB_REF_NAME" \
+            --expected-commit "$EXPECTED_BUILD_SHA"
+
       - name: Create a new unpublished draft Release
         id: release
         env:
@@ -260,6 +282,17 @@ jobs:
               if remote.get("digest") != expected_digest:
                   raise SystemExit(f"uploaded Release asset digest mismatch/unavailable: {name}")
           PY
+
+      - name: Recheck live tag and Ruleset immediately before publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_RULESET_AUDIT_TOKEN: ${{ secrets.RELEASE_RULESET_AUDIT_TOKEN }}
+        run: |
+          set -euo pipefail
+          /usr/bin/python3 scripts/verify_release_safety.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$GITHUB_REF_NAME" \
+            --expected-commit "$EXPECTED_BUILD_SHA"
 
       - name: Publish the verified draft Release
         env:
